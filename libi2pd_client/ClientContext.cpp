@@ -634,7 +634,8 @@ namespace client
 						{
 							// socks proxy
 							std::string outproxy = section.second.get("outproxy", "");
-							auto tun = std::make_shared<i2p::proxy::SOCKSProxy>(name, address, port, !outproxy.empty(), outproxy, destinationPort, localDestination);
+							uint32_t outproxyport = section.second.get("outproxyport", 0);
+							auto tun = std::make_shared<i2p::proxy::SOCKSProxy>(name, address, port, !outproxy.empty(), outproxy, outproxyport, localDestination);
 							clientTunnel = tun;
 							clientEndpoint = tun->GetLocalEndpoint ();
 						}

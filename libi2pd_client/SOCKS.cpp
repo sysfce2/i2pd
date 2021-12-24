@@ -31,7 +31,6 @@ namespace proxy
 
 	static const size_t SOCKS_UPSTREAM_SOCKS4A_REPLY_SIZE = 8;
 	static const size_t SOCKS_UPSTREAM_SOCKS5_INIT_REPLY_SIZE = 2;
-	static const size_t SOCKS_UPSTREAM_SOCKS5_CONNECT_REPLY_MIN_SIZE = 10;
 
 	struct SOCKSDnsAddress
 	{
@@ -258,19 +257,19 @@ namespace proxy
 				break;
 			case ADDR_DNS:
 				std::string address(addr.dns.value, addr.dns.size);
-				if(address.substr(addr.dns.size - 4, 4) == ".i2p") // overwrite if requested address inside I2P
+				//if(address.substr(addr.dns.size - 4, 4) == ".i2p") // overwrite if requested address inside I2P
 				{
 					m_response[3] = ADDR_IPV4;
 					size += 4;
 					memset(m_response + 4, 0, 6); // six HEX zeros
 				}
-				else
+				/*else
 				{
-					size += (1 + addr.dns.size); /* name length + resolved address */
+					size += (1 + addr.dns.size); // name length + resolved address
 					m_response[4] = addr.dns.size;
-					memcpy(m_response + 5, addr.dns.value, addr.dns.size);
+					memcpy(m_response + 5, addr.dns.value, addr.dns.size); // 4 - header + 1 - record size
 					htobe16buf(m_response + size - 2, port);
-				}
+				}*/
 				break;
 		}
 		return boost::asio::const_buffers_1(m_response, size);
@@ -738,32 +737,43 @@ namespace proxy
 
 	void SOCKSHandler::HandleUpstreamData(uint8_t * dataptr, std::size_t len)
 	{
-		if (m_state == UPSTREAM_HANDSHAKE) {
+		if (m_state == UPSTREAM_HANDSHAKE)
+		{
 			m_upstream_response_len += len;
 			// handle handshake data
-			if (m_upstream_response_len == SOCKS_UPSTREAM_SOCKS5_INIT_REPLY_SIZE) {
-				if (m_upstream_response[0] == '\x05' && m_upstream_response[1] != AUTH_UNACCEPTABLE) {
-					LogPrint(eLogInfo, "SOCKS: upstream proxy: success greeting");
-					SendUpstreamRequest(m_socksv, false);
-				} else {
-					LogPrint(eLogError, "SOCKS: upstream proxy failure: no acceptable methods were offered");
-					SocksRequestFailed(SOCKS5_GEN_FAIL);
-				}
-			}
-			else if (m_upstream_response[0] == '\x05' && m_upstream_response_len >= SOCKS_UPSTREAM_SOCKS5_CONNECT_REPLY_MIN_SIZE)
+			if (m_upstream_response_len == SOCKS_UPSTREAM_SOCKS5_INIT_REPLY_SIZE)
 			{
-				uint8_t resp = m_upstream_response[1];
-				if (resp == SOCKS5_OK) {
-					SocksUpstreamSuccess();
-				} else {
-					LogPrint(eLogError, "SOCKS: upstream proxy failure: ", (int) resp);
+				if (m_upstream_response[0] == '\x05' && m_upstream_response[1] != AUTH_UNACCEPTABLE)
+				{
+					LogPrint(eLogInfo, "SOCKS: upstream SOCKS5 proxy: success greeting");
+					SendUpstreamRequest(m_socksv, false);
+				}
+				else
+				{
+					LogPrint(eLogError, "SOCKS: upstream SOCKS5 proxy failure: no acceptable methods were offered");
 					SocksRequestFailed(SOCKS5_GEN_FAIL);
 				}
 			}
-			else if (m_upstream_response_len < SOCKS_UPSTREAM_SOCKS4A_REPLY_SIZE) {
+			else if (m_upstream_response[0] == '\x05')
+			{
+				if (m_upstream_response[1] == SOCKS5_OK)
+				{
+					LogPrint(eLogInfo, "SOCKS: upstream SOCKS5 proxy: successully established");
+					SocksUpstreamSuccess();
+				}
+				else
+				{
+					LogPrint(eLogError, "SOCKS: upstream proxy failure: ", (int) m_upstream_response[1]);
+					SocksRequestFailed(SOCKS5_GEN_FAIL);
+				}
+			}
+			else if (m_upstream_response_len < SOCKS_UPSTREAM_SOCKS4A_REPLY_SIZE)
+			{
 				// too small, continue reading
 				AsyncUpstreamSockRead();
-			} else if (len == SOCKS_UPSTREAM_SOCKS4A_REPLY_SIZE) {
+			}
+			else if (len == SOCKS_UPSTREAM_SOCKS4A_REPLY_SIZE)
+			{
 				// just right
 				uint8_t resp = m_upstream_response[1];
 				if (resp == SOCKS4_OK) {
@@ -775,11 +785,15 @@ namespace proxy
 					// TODO: runtime error?
 					SocksRequestFailed(SOCKS5_GEN_FAIL);
 				}
-			} else {
+			}
+			else
+			{
 				// too big
 				SocksRequestFailed(SOCKS5_GEN_FAIL);
 			}
-		} else {
+		}
+		else
+		{
 			// invalid state
 			LogPrint(eLogError, "SOCKS: Invalid state reading from upstream: ", (int) m_state);
 		}
