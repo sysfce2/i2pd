@@ -290,7 +290,30 @@ namespace proxy
 			}
 			else
 			{
-				return GenerateSOCKS5Response(SOCKS5_GEN_FAIL, m_addrtype, m_address, m_port); // dirty hack, SOCKS5_GEN_FAIL == 1, that's a "establish a TCP/IP stream connection" command
+				upstreamRequestSize   = 6;          // header + port
+				m_upstream_request[0] = '\x05';     // version
+				m_upstream_request[1] = '\x01';     // request tcp socket opening
+				m_upstream_request[2] = '\x00';     // reserved
+				m_upstream_request[3] = m_addrtype; // address type
+				switch (m_addrtype)
+				{
+					case ADDR_IPV4:
+						upstreamRequestSize += 4;
+						htobe32buf(m_upstream_request + 4, m_address.ip);
+						htobe16buf(m_upstream_request + upstreamRequestSize - 2, m_port);
+						break;
+					case ADDR_IPV6:
+						upstreamRequestSize += 16;
+						memcpy(m_upstream_request + 4, m_address.ipv6, 16);
+						htobe16buf(m_upstream_request + upstreamRequestSize - 2, m_port);
+						break;
+					case ADDR_DNS:
+						upstreamRequestSize += (1 + m_address.dns.size); // name length + resolved address
+						m_upstream_request[4] = m_address.dns.size;
+						memcpy(m_upstream_request + 5, m_address.dns.value, m_address.dns.size); // 4 - header + 1 - record size
+						htobe16buf(m_upstream_request + upstreamRequestSize - 2, m_port);
+						break;
+				}
 			}
 		}
 		else if (version == 4) // SOCKS4a
@@ -745,7 +768,7 @@ namespace proxy
 			{
 				if (m_upstream_response[0] == '\x05' && m_upstream_response[1] != AUTH_UNACCEPTABLE)
 				{
-					LogPrint(eLogInfo, "SOCKS: upstream SOCKS5 proxy: success greeting");
+					LogPrint(eLogInfo, "SOCKS: upstream SOCKS5 proxy: success greeting, sending connection request");
 					SendUpstreamRequest(m_socksv, false);
 				}
 				else

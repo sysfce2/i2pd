@@ -243,7 +243,7 @@ namespace client
 		LogPrint(eLogDebug, "TCPIPPipe: Downstream: ", (int) bytes_transfered, " bytes received");
 		if (ecode)
 		{
-			LogPrint(eLogError, "TCPIPPipe: Downstream read error:" , ecode.message());
+			LogPrint(eLogError, "TCPIPPipe: Downstream read error: " , ecode.message());
 			if (ecode != boost::asio::error::operation_aborted)
 				Terminate();
 		} else {
@@ -256,7 +256,7 @@ namespace client
 	void TCPIPPipe::HandleDownstreamWrite(const boost::system::error_code & ecode) {
 		if (ecode)
 		{
-			LogPrint(eLogError, "TCPIPPipe: Downstream write error:" , ecode.message());
+			LogPrint(eLogError, "TCPIPPipe: Downstream write error: " , ecode.message());
 			if (ecode != boost::asio::error::operation_aborted)
 				Terminate();
 		}
@@ -267,7 +267,7 @@ namespace client
 	void TCPIPPipe::HandleUpstreamWrite(const boost::system::error_code & ecode) {
 		if (ecode)
 		{
-			LogPrint(eLogError, "TCPIPPipe: Upstream write error:" , ecode.message());
+			LogPrint(eLogError, "TCPIPPipe: Upstream write error: " , ecode.message());
 			if (ecode != boost::asio::error::operation_aborted)
 				Terminate();
 		}
@@ -280,7 +280,7 @@ namespace client
 		LogPrint(eLogDebug, "TCPIPPipe: Upstream ", (int)bytes_transfered, " bytes received");
 		if (ecode)
 		{
-			LogPrint(eLogError, "TCPIPPipe: Upstream read error:" , ecode.message());
+			LogPrint(eLogError, "TCPIPPipe: Upstream read error: " , ecode.message());
 			if (ecode != boost::asio::error::operation_aborted)
 				Terminate();
 		} else {

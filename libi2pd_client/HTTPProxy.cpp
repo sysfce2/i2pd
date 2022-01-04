@@ -483,8 +483,10 @@ namespace proxy {
 
 	void HTTPReqHandler::HandleUpstreamSocksProxyConnect(const boost::system::error_code & ec)
 	{
-		if(!ec) {
-			if(m_RequestURL.host.size() > 255) {
+		if(!ec)
+		{
+			if(m_RequestURL.host.size() > 255)
+			{
 				GenericProxyError(tr("hostname too long"), m_RequestURL.host);
 				return;
 			}
@@ -512,7 +514,9 @@ namespace proxy {
 			reqsize += host.size();
 			m_socks_buf[++reqsize] = 0;
 			boost::asio::async_write(*m_proxysock, boost::asio::buffer(m_socks_buf, reqsize), boost::asio::transfer_all(), std::bind(&HTTPReqHandler::HandleSocksProxySendHandshake, this, std::placeholders::_1, std::placeholders::_2));
-		} else GenericProxyError(tr("cannot connect to upstream socks proxy"), ec.message());
+		}
+		else
+			GenericProxyError(tr("cannot connect to upstream socks proxy"), ec.message());
 	}
 
 	void HTTPReqHandler::HandleSocksProxySendHandshake(const boost::system::error_code & ec, std::size_t bytes_transferred)
