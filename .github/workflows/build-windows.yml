@@ -131,6 +131,7 @@ jobs:
         popd
         pushd mingw-w64-openssl
         gpg --recv-keys D9C4D26D0E604491
+        gpg --recv-keys 527466A21CA79E6D
         MINGW_ARCH=mingw32 makepkg-mingw -sCLf --noconfirm
         pacman --noconfirm -U mingw-w64-i686-openssl-*-any.pkg.tar.zst
         popd
