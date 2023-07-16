@@ -127,12 +127,12 @@ jobs:
         popd
         pushd mingw-w64-boost
         MINGW_ARCH=mingw32 makepkg-mingw -sCLf --noconfirm
-        pacman -U mingw-w64-i686-boost-*-any.pkg.tar.zst
+        pacman --noconfirm -U mingw-w64-i686-boost-*-any.pkg.tar.zst
         popd
         pushd mingw-w64-openssl
         gpg --recv-keys D9C4D26D0E604491
         MINGW_ARCH=mingw32 makepkg-mingw -sCLf --noconfirm
-        pacman -U mingw-w64-i686-openssl-*-any.pkg.tar.zst
+        pacman --noconfirm -U mingw-w64-i686-openssl-*-any.pkg.tar.zst
         popd
         popd
 
