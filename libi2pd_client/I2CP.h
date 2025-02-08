@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -11,6 +11,7 @@
 
 #include <inttypes.h>
 #include <string>
+#include <string_view>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -30,6 +31,7 @@ namespace client
 	const size_t I2CP_MAX_MESSAGE_LENGTH = 65535;
 	const size_t I2CP_MAX_SEND_QUEUE_SIZE = 1024*1024; // in bytes, 1M
 	const int I2CP_LEASESET_CREATION_TIMEOUT = 10; // in seconds
+	const int I2CP_SESSION_ACK_REQUEST_INTERVAL = 12100; // in milliseconds
 
 	const size_t I2CP_HEADER_LENGTH_OFFSET = 0;
 	const size_t I2CP_HEADER_TYPE_OFFSET = I2CP_HEADER_LENGTH_OFFSET + 4;
@@ -81,7 +83,7 @@ namespace client
 	{
 		public:
 
-			I2CPDestination (boost::asio::io_service& service, std::shared_ptr<I2CPSession> owner,
+			I2CPDestination (boost::asio::io_context& service, std::shared_ptr<I2CPSession> owner,
 				std::shared_ptr<const i2p::data::IdentityEx> identity, bool isPublic, bool isSameThread, 
 			    const std::map<std::string, std::string>& params);
 			~I2CPDestination () {};
@@ -191,8 +193,8 @@ namespace client
 
 			void HandleI2CPMessageSent (const boost::system::error_code& ecode, std::size_t bytes_transferred);
 
-			std::string ExtractString (const uint8_t * buf, size_t len);
-			size_t PutString (uint8_t * buf, size_t len, const std::string& str);
+			std::string_view ExtractString (const uint8_t * buf, size_t len);
+			size_t PutString (uint8_t * buf, size_t len, std::string_view str);
 			void ExtractMapping (const uint8_t * buf, size_t len, std::map<std::string, std::string>& mapping);
 			void SendSessionStatusMessage (I2CPSessionStatus status);
 			void SendHostReplyMessage (uint32_t requestID, std::shared_ptr<const i2p::data::IdentityEx> identity);
@@ -227,7 +229,7 @@ namespace client
 
 			void Start ();
 			void Stop ();
-			boost::asio::io_service& GetService () { return GetIOService (); };
+			auto& GetService () { return GetIOService (); };
 			bool IsSingleThread () const { return m_IsSingleThread; };
 
 			bool InsertSession (std::shared_ptr<I2CPSession> session);

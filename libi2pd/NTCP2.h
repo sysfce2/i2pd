@@ -95,21 +95,21 @@ namespace transport
 		const uint8_t * GetCK () const { return m_CK; };
 		const uint8_t * GetH () const { return m_H; };
 
-		void KDF1Alice ();
-		void KDF1Bob ();
-		void KDF2Alice ();
-		void KDF2Bob ();
-		void KDF3Alice (); // for SessionConfirmed part 2
-		void KDF3Bob ();
+		bool KDF1Alice ();
+		bool KDF1Bob ();
+		bool KDF2Alice ();
+		bool KDF2Bob ();
+		bool KDF3Alice (); // for SessionConfirmed part 2
+		bool KDF3Bob ();
 
-		void KeyDerivationFunction1 (const uint8_t * pub, i2p::crypto::X25519Keys& priv, const uint8_t * rs, const uint8_t * epub); // for SessionRequest, (pub, priv) for DH
-		void KeyDerivationFunction2 (const uint8_t * sessionRequest, size_t sessionRequestLen, const uint8_t * epub); // for SessionCreate
+		bool KeyDerivationFunction1 (const uint8_t * pub, i2p::crypto::X25519Keys& priv, const uint8_t * rs, const uint8_t * epub); // for SessionRequest, (pub, priv) for DH
+		bool KeyDerivationFunction2 (const uint8_t * sessionRequest, size_t sessionRequestLen, const uint8_t * epub); // for SessionCreate
 		void CreateEphemeralKey ();
 
-		void CreateSessionRequestMessage (std::mt19937& rng);
-		void CreateSessionCreatedMessage (std::mt19937& rng);
+		bool CreateSessionRequestMessage (std::mt19937& rng);
+		bool CreateSessionCreatedMessage (std::mt19937& rng);
 		void CreateSessionConfirmedMessagePart1 (const uint8_t * nonce);
-		void CreateSessionConfirmedMessagePart2 (const uint8_t * nonce);
+		bool CreateSessionConfirmedMessagePart2 (const uint8_t * nonce);
 
 		bool ProcessSessionRequestMessage (uint16_t& paddingLen, bool& clockSkew);
 		bool ProcessSessionCreatedMessage (uint16_t& paddingLen);
@@ -147,13 +147,14 @@ namespace transport
 			void SetRemoteEndpoint (const boost::asio::ip::tcp::endpoint& ep) { m_RemoteEndpoint = ep; };
 
 			bool IsEstablished () const override { return m_IsEstablished; };
+			i2p::data::RouterInfo::SupportedTransports GetTransportType () const override;
 			bool IsTerminated () const { return m_IsTerminated; };
 
 			void ClientLogin (); // Alice
 			void ServerLogin (); // Bob
 
 			void SendLocalRouterInfo (bool update) override; // after handshake or by update
-			void SendI2NPMessages (const std::vector<std::shared_ptr<I2NPMessage> >& msgs) override;
+			void SendI2NPMessages (std::list<std::shared_ptr<I2NPMessage> >& msgs) override;
 			void MoveSendQueue (std::shared_ptr<NTCP2Session> other);
 			
 		private:
@@ -172,13 +173,17 @@ namespace transport
 
 			void HandleSessionRequestSent (const boost::system::error_code& ecode, std::size_t bytes_transferred);
 			void HandleSessionRequestReceived (const boost::system::error_code& ecode, std::size_t bytes_transferred);
+			void ProcessSessionRequest (size_t len);
 			void HandleSessionRequestPaddingReceived (const boost::system::error_code& ecode, std::size_t bytes_transferred);
 			void HandleSessionCreatedSent (const boost::system::error_code& ecode, std::size_t bytes_transferred);
 			void HandleSessionCreatedReceived (const boost::system::error_code& ecode, std::size_t bytes_transferred);
+			void ProcessSessionCreated (size_t len);
 			void HandleSessionCreatedPaddingReceived (const boost::system::error_code& ecode, std::size_t bytes_transferred);
 			void HandleSessionConfirmedSent (const boost::system::error_code& ecode, std::size_t bytes_transferred);
 			void HandleSessionConfirmedReceived (const boost::system::error_code& ecode, std::size_t bytes_transferred);
-
+			void ProcessSessionConfirmed ();
+			void EstablishSessionAfterSessionConfirmed (std::shared_ptr<std::vector<uint8_t> > buf, size_t size);
+			
 			// data
 			void ReceiveLength ();
 			void HandleReceivedLength (const boost::system::error_code& ecode, std::size_t bytes_transferred);
@@ -196,7 +201,7 @@ namespace transport
 			void SendRouterInfo ();
 			void SendTermination (NTCP2TerminationReason reason);
 			void SendTerminationAndTerminate (NTCP2TerminationReason reason);
-			void PostI2NPMessages (std::vector<std::shared_ptr<I2NPMessage> > msgs);
+			void PostI2NPMessages ();
 
 		private:
 
@@ -229,13 +234,28 @@ namespace transport
 			bool m_IsSending, m_IsReceiving;
 			std::list<std::shared_ptr<I2NPMessage> > m_SendQueue;
 			uint64_t m_NextRouterInfoResendTime; // seconds since epoch
-
+			
+			std::list<std::shared_ptr<I2NPMessage> > m_IntermediateQueue; // from transports
+			mutable std::mutex m_IntermediateQueueMutex;
+			
 			uint16_t m_PaddingSizes[16];
 			int m_NextPaddingSize;
 	};
 
 	class NTCP2Server: private i2p::util::RunnableServiceWithWork
 	{
+		private:
+
+			class EstablisherService: public i2p::util::RunnableServiceWithWork
+			{
+				public:
+
+					EstablisherService (): RunnableServiceWithWork ("NTCP2e") {};
+					auto& GetService () { return GetIOService (); };
+					void Start () { StartIOService (); };
+					void Stop () { StopIOService (); };
+			};
+			
 		public:
 
 			enum ProxyType
@@ -244,14 +264,20 @@ namespace transport
 				eSocksProxy,
 				eHTTPProxy
 			};
-
+			
 			NTCP2Server ();
 			~NTCP2Server ();
 
 			void Start ();
 			void Stop ();
-			boost::asio::io_service& GetService () { return GetIOService (); };
+			auto& GetService () { return GetIOService (); };
+			auto& GetEstablisherService () { return m_EstablisherService.GetService (); };
 			std::mt19937& GetRng () { return m_Rng; };
+			void AEADChaCha20Poly1305Encrypt (const std::vector<std::pair<uint8_t *, size_t> >& bufs, 
+				const uint8_t * key, const uint8_t * nonce, uint8_t * mac);
+			bool AEADChaCha20Poly1305Decrypt (const uint8_t * msg, size_t msgLen, const uint8_t * ad, size_t adLen,
+				const uint8_t * key, const uint8_t * nonce, uint8_t * buf, size_t len); 
+			
 
 			bool AddNTCP2Session (std::shared_ptr<NTCP2Session> session, bool incoming = false);
 			void RemoveNTCP2Session (std::shared_ptr<NTCP2Session> session);
@@ -289,9 +315,13 @@ namespace transport
 			uint16_t m_ProxyPort;
 			boost::asio::ip::tcp::resolver m_Resolver;
 			std::unique_ptr<boost::asio::ip::tcp::endpoint> m_ProxyEndpoint;
+			
 			std::shared_ptr<boost::asio::ip::tcp::endpoint> m_Address4, m_Address6, m_YggdrasilAddress;
 			std::mt19937 m_Rng;
-
+			EstablisherService m_EstablisherService;
+			i2p::crypto::AEADChaCha20Poly1305Encryptor m_Encryptor;
+			i2p::crypto::AEADChaCha20Poly1305Decryptor m_Decryptor;
+			
 		public:
 
 			// for HTTP/I2PControl

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -9,6 +9,7 @@
 #include <cstring>
 #include <cassert>
 #include <string>
+#include <string_view>
 #include <atomic>
 #include <memory>
 #include <set>
@@ -59,7 +60,8 @@ namespace proxy {
 		"</head>\r\n"
 	;
 
-	bool str_rmatch(std::string & str, const char *suffix) {
+	static bool str_rmatch(std::string_view str, const char *suffix) 
+	{
 		auto pos = str.rfind (suffix);
 		if (pos == std::string::npos)
 			return false; /* not found */
@@ -77,26 +79,26 @@ namespace proxy {
 			void Terminate();
 			void AsyncSockRead();
 			static bool ExtractAddressHelper(i2p::http::URL& url, std::string& jump, bool& confirm);
-			static bool VerifyAddressHelper (const std::string& jump);
-			static void SanitizeHTTPRequest(i2p::http::HTTPReq& req);
+			static bool VerifyAddressHelper (std::string_view jump);
+			void SanitizeHTTPRequest(i2p::http::HTTPReq& req);
 			void SentHTTPFailed(const boost::system::error_code & ecode);
 			void HandleStreamRequestComplete (std::shared_ptr<i2p::stream::Stream> stream);
 			/* error helpers */
-			void GenericProxyError(const std::string& title, const std::string& description);
-			void GenericProxyInfo(const std::string& title, const std::string& description);
-			void HostNotFound(std::string& host);
-			void SendProxyError(std::string& content);
-			void SendRedirect(std::string& address);
+			void GenericProxyError(std::string_view title, std::string_view description);
+			void GenericProxyInfo(std::string_view title, std::string_view description);
+			void HostNotFound(std::string_view host);
+			void SendProxyError(std::string_view content);
+			void SendRedirect(const std::string& address);
 
 			void ForwardToUpstreamProxy();
 			void HandleUpstreamHTTPProxyConnect(const boost::system::error_code & ec);
 			void HandleUpstreamSocksProxyConnect(const boost::system::error_code & ec);
-			void HTTPConnect(const std::string & host, uint16_t port);
+			void HTTPConnect(std::string_view host, uint16_t port);
 			void HandleHTTPConnectStreamRequestComplete(std::shared_ptr<i2p::stream::Stream> stream);
 
 			typedef std::function<void(boost::asio::ip::tcp::endpoint)> ProxyResolvedHandler;
 
-			void HandleUpstreamProxyResolved(const boost::system::error_code & ecode, boost::asio::ip::tcp::resolver::iterator itr, ProxyResolvedHandler handler);
+			void HandleUpstreamProxyResolved(const boost::system::error_code & ecode, boost::asio::ip::tcp::resolver::results_type endpoints, ProxyResolvedHandler handler);
 
 			void SocksProxySuccess();
 			void HandoverToUpstreamProxy();
@@ -108,7 +110,7 @@ namespace proxy {
 			std::shared_ptr<boost::asio::ip::tcp::socket> m_proxysock;
 			boost::asio::ip::tcp::resolver m_proxy_resolver;
 			std::string m_OutproxyUrl, m_Response;
-			bool m_Addresshelper;
+			bool m_Addresshelper, m_SendUserAgent;
 			i2p::http::URL m_ProxyURL;
 			i2p::http::URL m_RequestURL;
 			int m_req_len;
@@ -124,7 +126,8 @@ namespace proxy {
 				m_proxysock(std::make_shared<boost::asio::ip::tcp::socket>(parent->GetService())),
 				m_proxy_resolver(parent->GetService()),
 				m_OutproxyUrl(parent->GetOutproxyURL()),
-				m_Addresshelper(parent->GetHelperSupport()) {}
+				m_Addresshelper(parent->GetHelperSupport()),
+				m_SendUserAgent (parent->GetSendUserAgent ()) {}
 			~HTTPReqHandler() { Terminate(); }
 			void Handle () { AsyncSockRead(); } /* overload */
 	};
@@ -159,23 +162,24 @@ namespace proxy {
 		Done(shared_from_this());
 	}
 
-	void HTTPReqHandler::GenericProxyError(const std::string& title, const std::string& description) {
+	void HTTPReqHandler::GenericProxyError(std::string_view title, std::string_view description) 
+	{
 		std::stringstream ss;
 		ss << "<h1>" << tr("Proxy error") << ": " << title << "</h1>\r\n";
 		ss << "<p>" << description << "</p>\r\n";
-		std::string content = ss.str();
-		SendProxyError(content);
+		SendProxyError(ss.str ());
 	}
 
-	void HTTPReqHandler::GenericProxyInfo(const std::string& title, const std::string& description) {
+	void HTTPReqHandler::GenericProxyInfo(std::string_view title, std::string_view description) 
+	{
 		std::stringstream ss;
 		ss << "<h1>" << tr("Proxy info") << ": " << title << "</h1>\r\n";
 		ss << "<p>" << description << "</p>\r\n";
-		std::string content = ss.str();
-		SendProxyError(content);
+		SendProxyError(ss.str ());
 	}
 
-	void HTTPReqHandler::HostNotFound(std::string& host) {
+	void HTTPReqHandler::HostNotFound(std::string_view host) 
+	{
 		std::stringstream ss;
 		ss << "<h1>" << tr("Proxy error: Host not found") << "</h1>\r\n"
 		   << "<p>" << tr("Remote host not found in router's addressbook") << "</p>\r\n"
@@ -188,11 +192,10 @@ namespace proxy {
 				ss << "  <li><a href=\"" << js->second << host << "\">" << js->first << "</a></li>\r\n";
 		}
 		ss << "</ul>\r\n";
-		std::string content = ss.str();
-		SendProxyError(content);
+		SendProxyError(ss.str ());
 	}
 
-	void HTTPReqHandler::SendProxyError(std::string& content)
+	void HTTPReqHandler::SendProxyError(std::string_view content)
 	{
 		i2p::http::HTTPRes res;
 		res.code = 500;
@@ -208,7 +211,7 @@ namespace proxy {
 			std::bind(&HTTPReqHandler::SentHTTPFailed, shared_from_this(), std::placeholders::_1));
 	}
 
-	void HTTPReqHandler::SendRedirect(std::string& address)
+	void HTTPReqHandler::SendRedirect(const std::string& address)
 	{
 		i2p::http::HTTPRes res;
 		res.code = 302;
@@ -272,7 +275,7 @@ namespace proxy {
 		return true;
 	}
 
-	bool HTTPReqHandler::VerifyAddressHelper (const std::string& jump)
+	bool HTTPReqHandler::VerifyAddressHelper (std::string_view jump)
 	{
 		auto pos = jump.find(".b32.i2p");
 		if (pos != std::string::npos)
@@ -312,7 +315,8 @@ namespace proxy {
 		req.RemoveHeader("X-Forwarded");
 		req.RemoveHeader("Proxy-"); // Proxy-*
 		/* replace headers */
-		req.UpdateHeader("User-Agent", "MYOB/6.66 (AN/ON)");
+		if (!m_SendUserAgent)
+			req.UpdateHeader("User-Agent", "MYOB/6.66 (AN/ON)");
 
 		/**
 		 * i2pd PR #1816:
@@ -373,7 +377,7 @@ namespace proxy {
 		std::string jump;
 		if (ExtractAddressHelper(m_RequestURL, jump, m_Confirm))
 		{
-			if (!m_Addresshelper)
+			if (!m_Addresshelper || !i2p::client::context.GetAddressBook ().IsEnabled ())
 			{
 				LogPrint(eLogWarning, "HTTPProxy: Addresshelper request rejected");
 				GenericProxyError(tr("Invalid request"), tr("Addresshelper is not supported"));
@@ -441,7 +445,7 @@ namespace proxy {
 		bool useConnect = false;
 		if(m_ClientRequest.method == "CONNECT")
 		{
-			std::string uri(m_ClientRequest.uri);
+			const std::string& uri = m_ClientRequest.uri;
 			auto pos = uri.find(":");
 			if(pos == std::string::npos || pos == uri.size() - 1)
 			{
@@ -468,7 +472,7 @@ namespace proxy {
 			if (dest_host != "")
 			{
 				/* absolute url, replace 'Host' header */
-				std::string h = dest_host;
+				std::string h (dest_host);
 				if (dest_port != 0 && dest_port != 80)
 					h += ":" + std::to_string(dest_port);
 				m_ClientRequest.UpdateHeader("Host", h);
@@ -508,7 +512,7 @@ namespace proxy {
 					GenericProxyError(tr("Outproxy failure"), tr("Bad outproxy settings"));
 			} else {
 				LogPrint (eLogWarning, "HTTPProxy: Outproxy failure for ", dest_host, ": no outproxy enabled");
-				std::stringstream ss; ss << tr("Host %s is not inside I2P network, but outproxy is not enabled", dest_host.c_str());
+				std::stringstream ss; ss << tr("Host %s is not inside I2P network, but outproxy is not enabled", dest_host.c_str ());
 				GenericProxyError(tr("Outproxy failure"), ss.str());
 			}
 			return true;
@@ -548,9 +552,9 @@ namespace proxy {
 		std::string origURI = m_ClientRequest.uri; // TODO: what do we need to change uri for?
 		m_ClientRequest.uri = m_ClientRequestURL.to_string();
 
-		/* update User-Agent to ESR version of Firefox, same as Tor Browser below version 8, for non-HTTPS connections */
-		if(m_ClientRequest.method != "CONNECT")
-			m_ClientRequest.UpdateHeader("User-Agent", "Mozilla/5.0 (Windows NT 6.1; rv:60.0) Gecko/20100101 Firefox/60.0");
+		/* update User-Agent to ESR version of Firefox, same as Tor Browser below version 13, for non-HTTPS connections */
+		if(m_ClientRequest.method != "CONNECT" && !m_SendUserAgent)
+			m_ClientRequest.UpdateHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:109.0) Gecko/20100101 Firefox/115.0");
 
 		m_ClientRequest.write(m_ClientRequestBuffer);
 		m_ClientRequestBuffer << m_recv_buf.substr(m_req_len);
@@ -579,20 +583,22 @@ namespace proxy {
 			}
 			else
 			{
-				boost::asio::ip::tcp::resolver::query q(m_ProxyURL.host, std::to_string(m_ProxyURL.port));
-				m_proxy_resolver.async_resolve(q, std::bind(&HTTPReqHandler::HandleUpstreamProxyResolved, this, std::placeholders::_1, std::placeholders::_2, [&](boost::asio::ip::tcp::endpoint ep) {
-					m_proxysock->async_connect(ep, std::bind(&HTTPReqHandler::HandleUpstreamHTTPProxyConnect, this, std::placeholders::_1));
-				}));
+				m_proxy_resolver.async_resolve(m_ProxyURL.host, std::to_string(m_ProxyURL.port), std::bind(&HTTPReqHandler::HandleUpstreamProxyResolved, this, 
+				    std::placeholders::_1, std::placeholders::_2, [&](boost::asio::ip::tcp::endpoint ep) 
+				    {
+					 	m_proxysock->async_connect(ep, std::bind(&HTTPReqHandler::HandleUpstreamHTTPProxyConnect, this, std::placeholders::_1));
+					}));
 			}
 		}
 		else if (m_ProxyURL.schema == "socks")
 		{
 			/* handle upstream socks proxy */
 			if (!m_ProxyURL.port) m_ProxyURL.port = 9050; // default to tor default if not specified
-			boost::asio::ip::tcp::resolver::query q(m_ProxyURL.host, std::to_string(m_ProxyURL.port));
-			m_proxy_resolver.async_resolve(q, std::bind(&HTTPReqHandler::HandleUpstreamProxyResolved, this, std::placeholders::_1, std::placeholders::_2, [&](boost::asio::ip::tcp::endpoint ep) {
-				m_proxysock->async_connect(ep, std::bind(&HTTPReqHandler::HandleUpstreamSocksProxyConnect, this, std::placeholders::_1));
-			}));
+			m_proxy_resolver.async_resolve(m_ProxyURL.host, std::to_string(m_ProxyURL.port), std::bind(&HTTPReqHandler::HandleUpstreamProxyResolved, this, 
+			    std::placeholders::_1, std::placeholders::_2, [&](boost::asio::ip::tcp::endpoint ep) 
+			    {
+					m_proxysock->async_connect(ep, std::bind(&HTTPReqHandler::HandleUpstreamSocksProxyConnect, this, std::placeholders::_1));
+				}));
 		}
 		else
 		{
@@ -601,10 +607,10 @@ namespace proxy {
 		}
 	}
 
-	void HTTPReqHandler::HandleUpstreamProxyResolved(const boost::system::error_code & ec, boost::asio::ip::tcp::resolver::iterator it, ProxyResolvedHandler handler)
+	void HTTPReqHandler::HandleUpstreamProxyResolved(const boost::system::error_code & ec, boost::asio::ip::tcp::resolver::results_type endpoints, ProxyResolvedHandler handler)
 	{
 		if(ec) GenericProxyError(tr("Cannot resolve upstream proxy"), ec.message());
-		else handler(*it);
+		else handler(*endpoints.begin ());
 	}
 
 	void HTTPReqHandler::HandleUpstreamSocksProxyConnect(const boost::system::error_code & ec)
@@ -646,11 +652,10 @@ namespace proxy {
 		Terminate();
 	}
 
-	void HTTPReqHandler::HTTPConnect(const std::string & host, uint16_t port)
+	void HTTPReqHandler::HTTPConnect(std::string_view host, uint16_t port)
 	{
 		LogPrint(eLogDebug, "HTTPProxy: CONNECT ",host, ":", port);
-		std::string hostname(host);
-		if(str_rmatch(hostname, ".i2p"))
+		if(str_rmatch(host, ".i2p"))
 			GetOwner()->CreateStream (std::bind (&HTTPReqHandler::HandleHTTPConnectStreamRequestComplete,
 				shared_from_this(), std::placeholders::_1), host, port);
 		else
@@ -748,9 +753,10 @@ namespace proxy {
 		Done (shared_from_this());
 	}
 
-	HTTPProxy::HTTPProxy(const std::string& name, const std::string& address, uint16_t port, const std::string & outproxy, bool addresshelper, std::shared_ptr<i2p::client::ClientDestination> localDestination):
+	HTTPProxy::HTTPProxy(const std::string& name, const std::string& address, uint16_t port, 
+	    const std::string & outproxy, bool addresshelper, bool senduseragent, std::shared_ptr<i2p::client::ClientDestination> localDestination):
 		TCPIPAcceptor (address, port, localDestination ? localDestination : i2p::client::context.GetSharedLocalDestination ()),
-		m_Name (name), m_OutproxyUrl (outproxy), m_Addresshelper (addresshelper)
+		m_Name (name), m_OutproxyUrl (outproxy), m_Addresshelper (addresshelper), m_SendUserAgent (senduseragent)
 	{
 	}
 
