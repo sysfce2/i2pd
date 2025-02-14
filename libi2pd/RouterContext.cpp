@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -33,13 +33,14 @@ namespace i2p
 		m_ShareRatio (100), m_Status (eRouterStatusUnknown), m_StatusV6 (eRouterStatusUnknown),
 		m_Error (eRouterErrorNone), m_ErrorV6 (eRouterErrorNone),
 		m_Testing (false), m_TestingV6 (false), m_NetID (I2PD_NET_ID),
-		m_PublishReplyToken (0), m_IsHiddenMode (false)
+		m_PublishReplyToken (0), m_IsHiddenMode (false), 
+		m_Rng(i2p::util::GetMonotonicMicroseconds () % 1000000LL), m_IsSaving (false)
 	{
 	}
 
 	void RouterContext::Init ()
 	{
-		srand (i2p::util::GetMillisecondsSinceEpoch () % 1000);
+		srand (m_Rng () % 1000);
 		m_StartupTime = i2p::util::GetMonotonicSeconds ();
 
 		if (!Load ())
@@ -76,7 +77,7 @@ namespace i2p
 				m_CongestionUpdateTimer->cancel ();
 			m_Service->Stop ();
 			CleanUp (); // GarlicDestination
-		}	
+		}
 	}	
 
 	std::shared_ptr<i2p::data::RouterInfo::Buffer> RouterContext::CopyRouterInfoBuffer () const
@@ -140,7 +141,7 @@ namespace i2p
 				{
 					boost::asio::ip::address addr;
 					if (!host.empty ())
-						addr = boost::asio::ip::address::from_string (host);
+						addr = boost::asio::ip::make_address (host);
 					if (!addr.is_v4())
 						addr = boost::asio::ip::address_v4 ();
 					routerInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, addr, ntcp2Port);
@@ -161,7 +162,7 @@ namespace i2p
 				{
 					boost::asio::ip::address addr;
 					if (!host.empty ())
-						addr = boost::asio::ip::address::from_string (host);
+						addr = boost::asio::ip::make_address (host);
 					if (!addr.is_v4())
 						addr = boost::asio::ip::address_v4 ();
 					routerInfo.AddSSU2Address (m_SSU2Keys->staticPublicKey, m_SSU2Keys->intro, addr, ssu2Port);
@@ -192,7 +193,7 @@ namespace i2p
 						ntcp2Host = host;
 					boost::asio::ip::address addr;
 					if (!ntcp2Host.empty ())
-						addr = boost::asio::ip::address::from_string (ntcp2Host);
+						addr = boost::asio::ip::make_address (ntcp2Host);
 					if (!addr.is_v6())
 						addr = boost::asio::ip::address_v6 ();
 					routerInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, addr, ntcp2Port);
@@ -211,7 +212,7 @@ namespace i2p
 				{
 					boost::asio::ip::address addr;
 					if (!host.empty ())
-						addr = boost::asio::ip::address::from_string (host);
+						addr = boost::asio::ip::make_address (host);
 					if (!addr.is_v6())
 						addr = boost::asio::ip::address_v6 ();
 					routerInfo.AddSSU2Address (m_SSU2Keys->staticPublicKey, m_SSU2Keys->intro, addr, ssu2Port);
@@ -253,11 +254,36 @@ namespace i2p
 
 	void RouterContext::UpdateRouterInfo ()
 	{
+		std::shared_ptr<i2p::data::RouterInfo::Buffer> buffer;
 		{
 			std::lock_guard<std::mutex> l(m_RouterInfoMutex);
 			m_RouterInfo.CreateBuffer (m_Keys);
+			buffer = m_RouterInfo.CopyBuffer ();
 		}
-		m_RouterInfo.SaveToFile (i2p::fs::DataDirPath (ROUTER_INFO));
+		{
+			// update save buffer to latest
+			std::lock_guard<std::mutex> l(m_SaveBufferMutex);
+			m_SaveBuffer = buffer;
+		}
+		bool isSaving = false;
+		if (m_IsSaving.compare_exchange_strong (isSaving, true)) // try to save only if not being saved
+		{	
+			auto savingRouterInfo = std::async (std::launch::async, [this]() 
+				{
+					std::shared_ptr<i2p::data::RouterInfo::Buffer> buffer;
+					while (m_SaveBuffer)
+					{
+						{
+							std::lock_guard<std::mutex> l(m_SaveBufferMutex);
+							buffer = m_SaveBuffer;
+							m_SaveBuffer = nullptr;
+						}
+						if (buffer)
+							i2p::data::RouterInfo::SaveToFile (i2p::fs::DataDirPath (ROUTER_INFO), buffer);
+					}	
+					m_IsSaving = false;
+				});
+		}	
 		m_LastUpdateTime = i2p::util::GetSecondsSinceEpoch ();
 	}
 
@@ -323,6 +349,12 @@ namespace i2p
 				case eRouterStatusFirewalled:
 					SetUnreachable (true, false); // ipv4
 				break;
+				case eRouterStatusMesh:
+					m_RouterInfo.UpdateCaps (m_RouterInfo.GetCaps () | i2p::data::RouterInfo::eReachable);
+				break;	
+				case eRouterStatusProxy:
+					m_RouterInfo.UpdateCaps (m_RouterInfo.GetCaps () | i2p::data::RouterInfo::eUnreachable);
+				break;	
 				default:
 					;
 			}
@@ -553,6 +585,12 @@ namespace i2p
 			UpdateRouterInfo ();
 	}
 
+	void RouterContext::UpdateSSU2Introducer (const i2p::data::IdentHash& h, bool v4, uint32_t iTag, uint32_t iExp)
+	{
+		if (m_RouterInfo.UpdateSSU2Introducer (h, v4, iTag, iExp))
+			UpdateRouterInfo ();
+	}	
+		
 	void RouterContext::ClearSSU2Introducers (bool v4)
 	{
 		auto addr = m_RouterInfo.GetSSU2Address (v4);
@@ -610,8 +648,8 @@ namespace i2p
 			case i2p::data::CAPS_FLAG_LOW_BANDWIDTH1   : limit = 12; type = low;   break;
 			case i2p::data::CAPS_FLAG_LOW_BANDWIDTH2   : limit = i2p::data::LOW_BANDWIDTH_LIMIT; type = low;   break; // 48
 			case i2p::data::CAPS_FLAG_LOW_BANDWIDTH3  : limit = 64; type = low;  break;
-			case i2p::data::CAPS_FLAG_HIGH_BANDWIDTH1  : limit = 128; type = high;  break;
-			case i2p::data::CAPS_FLAG_HIGH_BANDWIDTH2  : limit = i2p::data::HIGH_BANDWIDTH_LIMIT; type = high;  break; // 256
+			case i2p::data::CAPS_FLAG_LOW_BANDWIDTH4  : limit = 128; type = low;  break;
+			case i2p::data::CAPS_FLAG_HIGH_BANDWIDTH  : limit = i2p::data::HIGH_BANDWIDTH_LIMIT; type = high;  break; // 256
 			case i2p::data::CAPS_FLAG_EXTRA_BANDWIDTH1 : limit = i2p::data::EXTRA_BANDWIDTH_LIMIT; type = extra; break; // 2048
 			case i2p::data::CAPS_FLAG_EXTRA_BANDWIDTH2 : limit = 1000000; type = unlim; break; // 1Gbyte/s
 			default:
@@ -626,9 +664,7 @@ namespace i2p
 			case low   : /* not set */; break;
 			case extra : caps |= i2p::data::RouterInfo::eExtraBandwidth; break; // 'P'
 			case unlim : caps |= i2p::data::RouterInfo::eExtraBandwidth;
-#if (__cplusplus >= 201703L) // C++ 17 or higher
 			[[fallthrough]];
-#endif
 			// no break here, extra + high means 'X'
 			case high : caps |= i2p::data::RouterInfo::eHighBandwidth; break;
 		}
@@ -792,7 +828,7 @@ namespace i2p
 							i2p::config::GetOption("host", ntcp2Host);
 						if (!ntcp2Host.empty () && ntcp2Port)
 						{
-							auto addr = boost::asio::ip::address::from_string (ntcp2Host);
+							auto addr = boost::asio::ip::make_address (ntcp2Host);
 							if (addr.is_v6 ())
 							{
 								m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, addr, ntcp2Port);
@@ -821,7 +857,7 @@ namespace i2p
 						std::string host; i2p::config::GetOption("host", host);
 						if (!host.empty ())
 						{
-						    auto addr = boost::asio::ip::address::from_string (host);
+						    auto addr = boost::asio::ip::make_address (host);
 							if (addr.is_v6 ())
 							{
 								m_RouterInfo.AddSSU2Address (m_SSU2Keys->staticPublicKey, m_SSU2Keys->intro, addr, ssu2Port);
@@ -890,7 +926,7 @@ namespace i2p
 						std::string host; i2p::config::GetOption("host", host);
 						if (!host.empty ())
 						{
-						    auto addr = boost::asio::ip::address::from_string (host);
+						    auto addr = boost::asio::ip::make_address (host);
 							if (addr.is_v4 ())
 							{
 								m_RouterInfo.AddNTCP2Address (m_NTCP2Keys->staticPublicKey, m_NTCP2Keys->iv, addr, ntcp2Port);
@@ -920,7 +956,7 @@ namespace i2p
 						std::string host; i2p::config::GetOption("host", host);
 						if (!host.empty ())
 						{
-						    auto addr = boost::asio::ip::address::from_string (host);
+						    auto addr = boost::asio::ip::make_address (host);
 							if (addr.is_v4 ())
 							{
 								m_RouterInfo.AddSSU2Address (m_SSU2Keys->staticPublicKey, m_SSU2Keys->intro, addr, ssu2Port);
@@ -1175,7 +1211,7 @@ namespace i2p
 	void RouterContext::ProcessGarlicMessage (std::shared_ptr<I2NPMessage> msg)
 	{
 		if (m_Service)
-			m_Service->GetService ().post (std::bind (&RouterContext::PostGarlicMessage, this, msg));
+			boost::asio::post (m_Service->GetService (), std::bind (&RouterContext::PostGarlicMessage, this, msg));
 		else
 			LogPrint (eLogError, "Router: service is NULL");
 	}
@@ -1203,7 +1239,7 @@ namespace i2p
 	void RouterContext::ProcessDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg)
 	{
 		if (m_Service)
-			m_Service->GetService ().post (std::bind (&RouterContext::PostDeliveryStatusMessage, this, msg));
+			boost::asio::post (m_Service->GetService (), std::bind (&RouterContext::PostDeliveryStatusMessage, this, msg));
 		else
 			LogPrint (eLogError, "Router: service is NULL");
 	}
@@ -1232,7 +1268,7 @@ namespace i2p
 			} data;
 			memcpy (data.k, key, 32);
 			data.t = tag;
-			m_Service->GetService ().post ([this,data](void)
+			boost::asio::post (m_Service->GetService (), [this,data](void)
 				{
 					AddECIESx25519Key (data.k, data.t);
 				});
@@ -1349,7 +1385,7 @@ namespace i2p
 		{	
 			m_PublishTimer->cancel ();
 			m_PublishTimer->expires_from_now (boost::posix_time::seconds(ROUTER_INFO_PUBLISH_INTERVAL + 
-				rand () % ROUTER_INFO_PUBLISH_INTERVAL_VARIANCE));
+				m_Rng () % ROUTER_INFO_PUBLISH_INTERVAL_VARIANCE));
 			m_PublishTimer->async_wait (std::bind (&RouterContext::HandlePublishTimer,
 				this, std::placeholders::_1));
 		}	
@@ -1398,7 +1434,7 @@ namespace i2p
 			auto onDrop = [this]()
 				{
 					if (m_Service)
-						m_Service->GetService ().post ([this]() { HandlePublishResendTimer (boost::system::error_code ()); });
+						boost::asio::post (m_Service->GetService (), [this]() { HandlePublishResendTimer (boost::system::error_code ()); });
 				};
 			if (i2p::transport::transports.IsConnected (floodfill->GetIdentHash ()) || // already connected
 				(floodfill->IsReachableFrom (i2p::context.GetRouterInfo ()) && // are we able to connect
@@ -1424,7 +1460,7 @@ namespace i2p
 						i2p::garlic::WrapECIESX25519MessageForRouter (msg, floodfill->GetIdentity ()->GetEncryptionPublicKey ()));
 				}	
 				else
-					LogPrint (eLogInfo, "Router: Can't publish our RouterInfo. No tunnles. Try again in ", ROUTER_INFO_CONFIRMATION_TIMEOUT, " seconds");
+					LogPrint (eLogInfo, "Router: Can't publish our RouterInfo. No tunnels. Try again in ", ROUTER_INFO_CONFIRMATION_TIMEOUT, " milliseconds");
 			}
 			m_PublishExcluded.insert (floodfill->GetIdentHash ());
 			m_PublishReplyToken = replyToken;
@@ -1438,7 +1474,7 @@ namespace i2p
 		if (m_PublishTimer)
 		{
 			m_PublishTimer->cancel ();
-			m_PublishTimer->expires_from_now (boost::posix_time::seconds(ROUTER_INFO_CONFIRMATION_TIMEOUT));
+			m_PublishTimer->expires_from_now (boost::posix_time::milliseconds(ROUTER_INFO_CONFIRMATION_TIMEOUT));
 			m_PublishTimer->async_wait (std::bind (&RouterContext::HandlePublishResendTimer,
 				this, std::placeholders::_1));
 		}	
@@ -1461,7 +1497,8 @@ namespace i2p
 		if (m_CongestionUpdateTimer)
 		{	
 			m_CongestionUpdateTimer->cancel ();
-			m_CongestionUpdateTimer->expires_from_now (boost::posix_time::seconds(ROUTER_INFO_CONGESTION_UPDATE_INTERVAL));
+			m_CongestionUpdateTimer->expires_from_now (boost::posix_time::seconds(
+				ROUTER_INFO_CONGESTION_UPDATE_INTERVAL + m_Rng () % ROUTER_INFO_CONGESTION_UPDATE_INTERVAL_VARIANCE));
 			m_CongestionUpdateTimer->async_wait (std::bind (&RouterContext::HandleCongestionUpdateTimer,
 				this, std::placeholders::_1));
 		}	
@@ -1481,7 +1518,7 @@ namespace i2p
 	void RouterContext::UpdateCongestion ()
 	{
 		auto c = i2p::data::RouterInfo::eLowCongestion;
-		if (!AcceptsTunnels () || !m_ShareRatio)
+		if (!AcceptsTunnels () || !m_ShareRatio)                                        	
 			c = i2p::data::RouterInfo::eRejectAll;
 		else
 		{
@@ -1500,7 +1537,7 @@ namespace i2p
 		if (m_CleanupTimer)
 		{	
 			m_CleanupTimer->cancel ();
-			m_CleanupTimer->expires_from_now (boost::posix_time::minutes(ROUTER_INFO_CLEANUP_INTERVAL));
+			m_CleanupTimer->expires_from_now (boost::posix_time::seconds(ROUTER_INFO_CLEANUP_INTERVAL));
 			m_CleanupTimer->async_wait (std::bind (&RouterContext::HandleCleanupTimer,
 				this, std::placeholders::_1));
 		}	

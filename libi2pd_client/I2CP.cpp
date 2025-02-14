@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -24,7 +24,7 @@ namespace i2p
 namespace client
 {
 
-	I2CPDestination::I2CPDestination (boost::asio::io_service& service, std::shared_ptr<I2CPSession> owner,
+	I2CPDestination::I2CPDestination (boost::asio::io_context& service, std::shared_ptr<I2CPSession> owner,
 		std::shared_ptr<const i2p::data::IdentityEx> identity, bool isPublic, bool isSameThread,
 	    const std::map<std::string, std::string>& params):
 		LeaseSetDestination (service, isPublic, &params),
@@ -88,7 +88,7 @@ namespace client
 
 	void I2CPDestination::CreateNewLeaseSet (const std::vector<std::shared_ptr<i2p::tunnel::InboundTunnel> >& tunnels)
 	{
-		GetService ().post (std::bind (&I2CPDestination::PostCreateNewLeaseSet, this, tunnels));
+		boost::asio::post (GetService (), std::bind (&I2CPDestination::PostCreateNewLeaseSet, this, tunnels));
 	}
 
 	void I2CPDestination::PostCreateNewLeaseSet (std::vector<std::shared_ptr<i2p::tunnel::InboundTunnel> > tunnels)
@@ -170,7 +170,7 @@ namespace client
 			{	
 				// send in destination's thread
 				auto s = GetSharedFromThis ();
-				GetService ().post (
+				boost::asio::post (GetService (),
 					[s, msg, remote, nonce]()
 					{
 						bool sent = s->SendMsg (msg, remote);
@@ -226,7 +226,8 @@ namespace client
 				leases = remote->GetNonExpiredLeases (true); // with threshold
 			if (!leases.empty ())
 			{
-				remoteLease = leases[rand () % leases.size ()];
+				auto pool = GetTunnelPool ();
+				remoteLease = leases[(pool ? pool->GetRng ()() : rand ()) % leases.size ()];
 				auto leaseRouter = i2p::data::netdb.FindRouter (remoteLease->tunnelGateway);
 				outboundTunnel = GetTunnelPool ()->GetNextOutboundTunnel (nullptr,
 					leaseRouter ? leaseRouter->GetCompatibleTransports (false) : (i2p::data::RouterInfo::CompatibleTransports)i2p::data::RouterInfo::eAllTransports);
@@ -554,20 +555,20 @@ namespace client
 			m_IsSending = false;
 	}
 
-	std::string I2CPSession::ExtractString (const uint8_t * buf, size_t len)
+	std::string_view I2CPSession::ExtractString (const uint8_t * buf, size_t len)
 	{
 		uint8_t l = buf[0];
 		if (l > len) l = len;
-		return std::string ((const char *)(buf + 1), l);
+		return { (const char *)(buf + 1), l };
 	}
 
-	size_t I2CPSession::PutString (uint8_t * buf, size_t len, const std::string& str)
+	size_t I2CPSession::PutString (uint8_t * buf, size_t len, std::string_view str)
 	{
 		auto l = str.length ();
 		if (l + 1 >= len) l = len - 1;
 		if (l > 255) l = 255; // 1 byte max
 		buf[0] = l;
-		memcpy (buf + 1, str.c_str (), l);
+		memcpy (buf + 1, str.data (), l);
 		return l + 1;
 	}
 
@@ -577,7 +578,7 @@ namespace client
 		size_t offset = 0;
 		while (offset < len)
 		{
-			std::string param = ExtractString (buf + offset, len - offset);
+			auto param = ExtractString (buf + offset, len - offset);
 			offset += param.length () + 1;
 			if (buf[offset] != '=')
 			{
@@ -586,7 +587,7 @@ namespace client
 			}
 			offset++;
 
-			std::string value = ExtractString (buf + offset, len - offset);
+			auto value = ExtractString (buf + offset, len - offset);
 			offset += value.length () + 1;
 			if (buf[offset] != ';')
 			{
@@ -594,7 +595,7 @@ namespace client
 				break;
 			}
 			offset++;
-			mapping.insert (std::make_pair (param, value));
+			mapping.emplace (param, value);
 		}
 	}
 
@@ -763,6 +764,7 @@ namespace client
 	void I2CPSession::AddRoutingSession (const i2p::data::IdentHash& signingKey, std::shared_ptr<i2p::garlic::GarlicRoutingSession> remoteSession)
 	{
 		if (!remoteSession) return;
+		remoteSession->SetAckRequestInterval (I2CP_SESSION_ACK_REQUEST_INTERVAL);
 		std::lock_guard<std::mutex> l(m_RoutingSessionsMutex);
 		m_RoutingSessions[signingKey] = remoteSession;
 	}
@@ -878,7 +880,7 @@ namespace client
 							if (!remoteSession || !m_Destination->SendMsg (buf + offset, payloadLen, remoteSession, nonce))
 							{	
 								i2p::data::IdentHash identHash;
-								SHA256(ident, identSize, identHash); // caclulate ident hash, because we don't need full identity
+								SHA256(ident, identSize, identHash); // calculate ident hash, because we don't need full identity
 								m_Destination->SendMsgTo (buf + offset, payloadLen, identHash, nonce);
 							}	
 						}
@@ -1078,7 +1080,7 @@ namespace client
 	I2CPServer::I2CPServer (const std::string& interface, uint16_t port, bool isSingleThread):
 		RunnableService ("I2CP"), m_IsSingleThread (isSingleThread),
 		m_Acceptor (GetIOService (),
-		boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(interface), port))
+		boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address(interface), port))
 	{
 		memset (m_MessagesHandlers, 0, sizeof (m_MessagesHandlers));
 		m_MessagesHandlers[I2CP_GET_DATE_MESSAGE] = &I2CPSession::GetDateMessageHandler;
@@ -1109,12 +1111,12 @@ namespace client
 	void I2CPServer::Stop ()
 	{
 		m_Acceptor.cancel ();
-		{
-			auto sessions = m_Sessions;
-			for (auto& it: sessions)
-				it.second->Stop ();
-		}
-		m_Sessions.clear ();
+		
+		decltype(m_Sessions) sessions;
+		m_Sessions.swap (sessions);
+		for (auto& it: sessions)
+			it.second->Stop ();
+		
 		StopIOService ();
 	}
 
