@@ -701,6 +701,7 @@ namespace http {
 	{
 		s << "<b>" << tr("Tunnels") << ":</b><br>\r\n";
 		s << "<b>" << tr("Queue size") << ":</b> " << i2p::tunnel::tunnels.GetQueueSize () << "<br>\r\n<br>\r\n";
+		s << "<b>" << tr("TBM Queue size") << ":</b> " << i2p::tunnel::tunnels.GetTBMQueueSize () << "<br>\r\n<br>\r\n";
 
 		auto ExplPool = i2p::tunnel::tunnels.GetExploratoryPool ();
 
@@ -825,7 +826,7 @@ namespace http {
 		if (i2p::tunnel::tunnels.CountTransitTunnels())
 		{
 			s << "<b>" << tr("Transit Tunnels") << ":</b><br>\r\n";
-			s << "<table><thead><th>&#8658;</th><th>ID</th><th>&#8658;</th><th>" << tr("Amount") << "</th></thead><tbody class=\"tableitem\">";
+			s << "<table><thead><th>&#8658;</th><th>ID</th><th>&#8658;</th><th>" << tr("Amount") << "</th><th>" << tr("Next") << "</th></thead><tbody class=\"tableitem\">";
 			for (const auto& it: i2p::tunnel::tunnels.GetTransitTunnels ())
 			{
 				if (std::dynamic_pointer_cast<i2p::tunnel::TransitTunnelGateway>(it))
@@ -835,7 +836,7 @@ namespace http {
 				else
 					s << "<tr><td>&#8658;</td><td>" << it->GetTunnelID () << "</td><td>&#8658;</td><td>";
 				ShowTraffic(s, it->GetNumTransmittedBytes ());
-				s << "</td></tr>\r\n";
+				s << "</td><td>" << it->GetNextPeerName () << "</td></tr>\r\n";
 			}
 			s << "</tbody></table>\r\n";
 		}
@@ -1480,13 +1481,13 @@ namespace http {
 		reply.body = content;
 
 		m_SendBuffer = reply.to_string();
-		boost::asio::async_write (*m_Socket, boost::asio::buffer(m_SendBuffer),
+		boost::asio::async_write (*m_Socket, boost::asio::buffer(m_SendBuffer), boost::asio::transfer_all (), 
 			std::bind (&HTTPConnection::Terminate, shared_from_this (), std::placeholders::_1));
 	}
 
 	HTTPServer::HTTPServer (const std::string& address, int port):
-		m_IsRunning (false), m_Thread (nullptr), m_Work (m_Service),
-		m_Acceptor (m_Service, boost::asio::ip::tcp::endpoint (boost::asio::ip::address::from_string(address), port)),
+		m_IsRunning (false), m_Thread (nullptr), m_Work (m_Service.get_executor ()),
+		m_Acceptor (m_Service, boost::asio::ip::tcp::endpoint (boost::asio::ip::make_address(address), port)),
 		m_Hostname(address)
 	{
 	}

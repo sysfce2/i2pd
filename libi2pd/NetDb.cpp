@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -10,7 +10,6 @@
 #include <fstream>
 #include <vector>
 #include <map>
-#include <random>
 #include <boost/asio.hpp>
 #include <stdexcept>
 
@@ -40,7 +39,7 @@ namespace data
 
 	NetDb::NetDb (): m_IsRunning (false), m_Thread (nullptr), m_Reseeder (nullptr), 
 		m_Storage("netDb", "r", "routerInfo-", "dat"), m_PersistProfiles (true),
-		m_LastExploratorySelectionUpdateTime (0)
+		m_LastExploratorySelectionUpdateTime (0), m_Rng(i2p::util::GetMonotonicMicroseconds () % 1000000LL)
 	{
 	}
 
@@ -69,7 +68,7 @@ namespace data
 		{
 			Reseed ();
 		}
-		else if (!GetRandomRouter (i2p::context.GetSharedRouterInfo (), false, false))
+		else if (!GetRandomRouter (i2p::context.GetSharedRouterInfo (), false, false, false))
 			Reseed (); // we don't have a router we can connect to. Trying to reseed
 
 		auto it = m_RouterInfos.find (i2p::context.GetIdentHash ());
@@ -119,19 +118,22 @@ namespace data
 		i2p::util::SetThreadName("NetDB");
 
 		uint64_t lastManage = 0;
-		uint64_t lastProfilesCleanup = i2p::util::GetMonotonicMilliseconds (), lastObsoleteProfilesCleanup = lastProfilesCleanup;
-		int16_t profilesCleanupVariance = 0, obsoleteProfilesCleanVariance = 0;
+		uint64_t lastProfilesCleanup = i2p::util::GetMonotonicMilliseconds (), 
+			lastObsoleteProfilesCleanup = lastProfilesCleanup, lastApplyingProfileUpdates = lastProfilesCleanup;
+		int16_t profilesCleanupVariance = 0, obsoleteProfilesCleanVariance = 0, applyingProfileUpdatesVariance = 0;
 
+		std::list<std::shared_ptr<const I2NPMessage> > msgs;
 		while (m_IsRunning)
 		{
 			try
 			{
-				auto msg = m_Queue.GetNextWithTimeout (1000); // 1 sec
-				if (msg)
+				if (m_Queue.Wait (1,0)) // 1 sec
 				{
-					int numMsgs = 0;
-					while (msg)
+					m_Queue.GetWholeQueue (msgs);
+					while (!msgs.empty ())
 					{
+						auto msg = msgs.front (); msgs.pop_front ();
+						if (!msg) continue;
 						LogPrint(eLogDebug, "NetDb: Got request with type ", (int) msg->GetTypeID ());
 						switch (msg->GetTypeID ())
 						{
@@ -141,17 +143,10 @@ namespace data
 							case eI2NPDatabaseLookup:
 								HandleDatabaseLookupMsg (msg);
 							break;
-							case eI2NPDummyMsg:
-								// plain RouterInfo from NTCP2 with flags for now
-								HandleNTCP2RouterInfoMsg (msg);
-							break;
 							default: // WTF?
 								LogPrint (eLogError, "NetDb: Unexpected message type ", (int) msg->GetTypeID ());
 								//i2p::HandleI2NPMessage (msg);
 						}
-						if (numMsgs > 100) break;
-						msg = m_Queue.Get ();
-						numMsgs++;
 					}
 				}
 				if (!m_IsRunning) break;
@@ -186,7 +181,7 @@ namespace data
 							LogPrint (eLogWarning, "NetDb: Can't persist profiles. Profiles are being saved to disk");
 					}	
 					lastProfilesCleanup = mts;
-					profilesCleanupVariance = rand () % i2p::data::PEER_PROFILE_AUTOCLEAN_VARIANCE;
+					profilesCleanupVariance = m_Rng () % i2p::data::PEER_PROFILE_AUTOCLEAN_VARIANCE;
 				}
 
 				if (mts >= lastObsoleteProfilesCleanup + (uint64_t)(i2p::data::PEER_PROFILE_OBSOLETE_PROFILES_CLEAN_TIMEOUT + obsoleteProfilesCleanVariance)*1000)
@@ -202,7 +197,20 @@ namespace data
 					else
 						LogPrint (eLogWarning, "NetDb: Can't delete profiles. Profiles are being deleted from disk");
 					lastObsoleteProfilesCleanup = mts;
-					obsoleteProfilesCleanVariance = rand () % i2p::data::PEER_PROFILE_OBSOLETE_PROFILES_CLEAN_VARIANCE;
+					obsoleteProfilesCleanVariance = m_Rng () % i2p::data::PEER_PROFILE_OBSOLETE_PROFILES_CLEAN_VARIANCE;
+				}	
+				if (mts >= lastApplyingProfileUpdates + i2p::data::PEER_PROFILE_APPLY_POSTPONED_TIMEOUT + applyingProfileUpdatesVariance)
+				{
+					bool isApplying = m_ApplyingProfileUpdates.valid ();
+					if (isApplying && m_ApplyingProfileUpdates.wait_for(std::chrono::seconds(0)) == std::future_status::ready) // still active?
+					{
+						m_ApplyingProfileUpdates.get ();
+						isApplying = false;
+					}	
+					if (!isApplying)
+						m_ApplyingProfileUpdates = i2p::data::FlushPostponedRouterProfileUpdates ();
+					lastApplyingProfileUpdates = mts;
+					applyingProfileUpdatesVariance = m_Rng () % i2p::data::PEER_PROFILE_APPLY_POSTPONED_TIMEOUT_VARIANCE;
 				}	
 			}
 			catch (std::exception& ex)
@@ -286,6 +294,7 @@ namespace data
 			}
 			else
 			{
+				r->CancelBufferToDelete (); // since an update received
 				if (CheckLogLevel (eLogDebug))
 					LogPrint (eLogDebug, "NetDb: RouterInfo is older: ", ident.ToBase64());
 				updated = false;
@@ -299,7 +308,8 @@ namespace data
 			{
 				auto mts = i2p::util::GetMillisecondsSinceEpoch ();
 			    isValid = mts + NETDB_EXPIRATION_TIMEOUT_THRESHOLD*1000LL > r->GetTimestamp () && // from future
-					mts < r->GetTimestamp () + NETDB_MAX_EXPIRATION_TIMEOUT*1000LL; // too old
+					(mts < r->GetTimestamp () + NETDB_MAX_EXPIRATION_TIMEOUT*1000LL || // too old
+					 context.GetUptime () < NETDB_CHECK_FOR_EXPIRATION_UPTIME/10); // enough uptime
 			}
 			if (isValid)	
 			{
@@ -388,8 +398,7 @@ namespace data
 			if (it == m_LeaseSets.end () || it->second->GetStoreType () != storeType ||
 				leaseSet->GetPublishedTimestamp () > it->second->GetPublishedTimestamp ())
 			{
-				if (leaseSet->IsPublic () && !leaseSet->IsExpired () &&
-				     i2p::util::GetSecondsSinceEpoch () + NETDB_EXPIRATION_TIMEOUT_THRESHOLD > leaseSet->GetPublishedTimestamp ())
+				if (leaseSet->IsPublic () && !leaseSet->IsExpired ())
 				{
 					// TODO: implement actual update
 					if (CheckLogLevel (eLogInfo))
@@ -484,7 +493,7 @@ namespace data
 	void NetDb::ReseedFromFloodfill(const RouterInfo & ri, int numRouters, int numFloodfills)
 	{
 		LogPrint(eLogInfo, "NetDB: Reseeding from floodfill ", ri.GetIdentHashBase64());
-		std::vector<std::shared_ptr<i2p::I2NPMessage> > requests;
+		std::list<std::shared_ptr<i2p::I2NPMessage> > requests;
 
 		i2p::data::IdentHash ourIdent = i2p::context.GetIdentHash();
 		i2p::data::IdentHash ih = ri.GetIdentHash();
@@ -507,7 +516,7 @@ namespace data
 		}
 
 		// send them off
-		i2p::transport::transports.SendMessages(ih, requests);
+		i2p::transport::transports.SendMessages(ih, std::move (requests));
 	}
 
 	bool NetDb::LoadRouterInfo (const std::string& path, uint64_t ts)
@@ -562,7 +571,7 @@ namespace data
 		while(n > 0)
 		{
 			std::lock_guard<std::mutex> lock(m_RouterInfosMutex);
-			uint32_t idx = rand () % m_RouterInfos.size ();
+			uint32_t idx = m_Rng () % m_RouterInfos.size ();
 			uint32_t i = 0;
 			for (const auto & it : m_RouterInfos) {
 				if(i >= idx) // are we at the random start point?
@@ -642,70 +651,79 @@ namespace data
 		if (checkForExpiration && uptime > i2p::transport::SSU2_TO_INTRODUCER_SESSION_DURATION) // 1 hour
 			expirationTimeout = i2p::context.IsFloodfill () ? NETDB_FLOODFILL_EXPIRATION_TIMEOUT*1000LL :
 				NETDB_MIN_EXPIRATION_TIMEOUT*1000LL + (NETDB_MAX_EXPIRATION_TIMEOUT - NETDB_MIN_EXPIRATION_TIMEOUT)*1000LL*NETDB_MIN_ROUTERS/total;
-
+		bool isOffline = checkForExpiration && i2p::transport::transports.GetNumPeers () < NETDB_MIN_TRANSPORTS; // enough routers and uptime, but no transports
+			
 		std::list<std::pair<std::string, std::shared_ptr<RouterInfo::Buffer> > > saveToDisk;
 		std::list<std::string> removeFromDisk;	
 			
 		auto own = i2p::context.GetSharedRouterInfo ();
-		for (auto& it: m_RouterInfos)
+		for (auto [ident, r]: m_RouterInfos)
 		{
-			if (!it.second || it.second == own) continue; // skip own
-			std::string ident = it.second->GetIdentHashBase64();
-			if (it.second->IsUpdated ())
+			if (!r || r == own) continue; // skip own
+			if (r->IsBufferScheduledToDelete ()) // from previous SaveUpdated, we assume m_PersistingRouters complete
 			{
-				if (it.second->GetBuffer ())
+				std::lock_guard<std::mutex> l(m_RouterInfosMutex); // possible collision between DeleteBuffer and Update
+				r->DeleteBuffer ();
+			}	
+			if (r->IsUpdated ())
+			{
+				if (r->GetBuffer () && !r->IsUnreachable ())
 				{
 					// we have something to save
 					std::shared_ptr<RouterInfo::Buffer> buffer;
 					{
 						std::lock_guard<std::mutex> l(m_RouterInfosMutex); // possible collision between DeleteBuffer and Update
-						buffer = it.second->GetSharedBuffer ();
-						it.second->DeleteBuffer ();
+						buffer = r->CopyBuffer ();
 					}
-					if (buffer && !it.second->IsUnreachable ()) // don't save bad router
-						saveToDisk.push_back(std::make_pair(ident, buffer));
-					it.second->SetUnreachable (false);
+					if (!i2p::transport::transports.IsConnected (ident))
+						r->ScheduleBufferToDelete ();
+					if (buffer)
+						saveToDisk.emplace_back(ident.ToBase64 (), buffer);
 				}
-				it.second->SetUpdated (false);
+				r->SetUpdated (false);
 				updatedCount++;
 				continue;
 			}
-			if (it.second->GetProfile ()->IsUnreachable ())
-				it.second->SetUnreachable (true);
+			else if (r->GetBuffer () && ts > r->GetTimestamp () + NETDB_MIN_EXPIRATION_TIMEOUT*1000LL)
+				// since update was long time ago we assume that router is not connected anymore
+				r->ScheduleBufferToDelete ();
+			
+			if (r->GetProfile ()->IsUnreachable ())
+				r->SetUnreachable (true);
 			// make router reachable back if too few routers or floodfills
-			if (it.second->IsUnreachable () && (total - deletedCount < NETDB_MIN_ROUTERS || isLowRate ||
-				(it.second->IsFloodfill () && totalFloodfills - deletedFloodfillsCount < NETDB_MIN_FLOODFILLS)))
-				it.second->SetUnreachable (false);
-			if (!it.second->IsUnreachable ())
+			if (r->IsUnreachable () && (total - deletedCount < NETDB_MIN_ROUTERS || isLowRate || isOffline ||
+				(r->IsFloodfill () && totalFloodfills - deletedFloodfillsCount < NETDB_MIN_FLOODFILLS)))
+				r->SetUnreachable (false);
+			if (!r->IsUnreachable ())
 			{
 				// find & mark expired routers
-				if (!it.second->GetCompatibleTransports (true)) // non reachable by any transport
-					it.second->SetUnreachable (true);
-				else if (ts + NETDB_EXPIRATION_TIMEOUT_THRESHOLD*1000LL < it.second->GetTimestamp ())
+				if (!r->GetCompatibleTransports (true)) // non reachable by any transport
+					r->SetUnreachable (true);
+				else if (ts + NETDB_EXPIRATION_TIMEOUT_THRESHOLD*1000LL < r->GetTimestamp ())
 				{
-					LogPrint (eLogWarning, "NetDb: RouterInfo is from future for ", (it.second->GetTimestamp () - ts)/1000LL, " seconds");
-					it.second->SetUnreachable (true);
+					LogPrint (eLogWarning, "NetDb: RouterInfo is from future for ", (r->GetTimestamp () - ts)/1000LL, " seconds");
+					r->SetUnreachable (true);
 				}
 				else if (checkForExpiration) 
 				{	
-					if (ts > it.second->GetTimestamp () + expirationTimeout)
-						it.second->SetUnreachable (true);
-					else if ((ts > it.second->GetTimestamp () + expirationTimeout/2) && // more than half of expiration
-						total > NETDB_NUM_ROUTERS_THRESHOLD && !it.second->IsHighBandwidth() &&  // low bandwidth
-						!it.second->IsFloodfill() && (!i2p::context.IsFloodfill () || // non floodfill 
-					    (CreateRoutingKey (it.second->GetIdentHash ()) ^ i2p::context.GetIdentHash ()).metric[0] >= 0x02)) // different first 7 bits 
-							it.second->SetUnreachable (true);
+					if (ts > r->GetTimestamp () + expirationTimeout)
+						r->SetUnreachable (true);
+					else if ((ts > r->GetTimestamp () + expirationTimeout/2) && // more than half of expiration
+						total > NETDB_NUM_ROUTERS_THRESHOLD && !r->IsHighBandwidth() &&  // low bandwidth
+						!r->IsFloodfill() && (!i2p::context.IsFloodfill () || // non floodfill 
+					    (CreateRoutingKey (ident) ^ i2p::context.GetIdentHash ()).metric[0] >= 0x02)) // different first 7 bits 
+							r->SetUnreachable (true);
 				}	
 			}
 			// make router reachable back if connected now
-			if (it.second->IsUnreachable () && i2p::transport::transports.IsConnected (it.second->GetIdentHash ()))
-				it.second->SetUnreachable (false);
+			if (r->IsUnreachable () && i2p::transport::transports.IsConnected (ident))
+				r->SetUnreachable (false);
 			
-			if (it.second->IsUnreachable ())
+			if (r->IsUnreachable ())
 			{
-				if (it.second->IsFloodfill ()) deletedFloodfillsCount++;
+				if (r->IsFloodfill ()) deletedFloodfillsCount++;
 				// delete RI file
-				removeFromDisk.push_back (ident);
+				removeFromDisk.emplace_back (ident.ToBase64());
 				deletedCount++;
 				if (total - deletedCount < NETDB_MIN_ROUTERS) checkForExpiration = false;
 			}
@@ -763,7 +781,8 @@ namespace data
 	
 	void NetDb::RequestDestination (const IdentHash& destination, RequestedDestination::RequestComplete requestComplete, bool direct)
 	{
-		if (direct && i2p::transport::transports.RoutesRestricted ()) direct = false; // always use tunnels for restricted routes
+		if (direct && (i2p::transport::transports.RoutesRestricted () || i2p::context.IsLimitedConnectivity ())) 
+		    direct = false; // always use tunnels for restricted routes or limited connectivity
 		if (m_Requests)
 			m_Requests->PostRequestDestination (destination, requestComplete, direct);
 		else
@@ -1133,15 +1152,18 @@ namespace data
 	}
 
 	std::shared_ptr<const RouterInfo> NetDb::GetRandomRouter (std::shared_ptr<const RouterInfo> compatibleWith,
-		bool reverse, bool endpoint) const
+		bool reverse, bool endpoint, bool clientTunnel) const
 	{
+		bool checkIsReal = clientTunnel && i2p::tunnel::tunnels.GetPreciseTunnelCreationSuccessRate () < NETDB_TUNNEL_CREATION_RATE_THRESHOLD && // too low rate
+			context.GetUptime () > NETDB_CHECK_FOR_EXPIRATION_UPTIME; // after 10 minutes uptime
 		return GetRandomRouter (
-			[compatibleWith, reverse, endpoint](std::shared_ptr<const RouterInfo> router)->bool
+			[compatibleWith, reverse, endpoint, clientTunnel, checkIsReal](std::shared_ptr<const RouterInfo> router)->bool
 			{
 				return !router->IsHidden () && router != compatibleWith &&
 					(reverse ? (compatibleWith->IsReachableFrom (*router) && router->GetCompatibleTransports (true)):
 						router->IsReachableFrom (*compatibleWith)) && !router->IsNAT2NATOnly (*compatibleWith) &&
-					router->IsECIES () && !router->IsHighCongestion (false) &&
+					router->IsECIES () && !router->IsHighCongestion (clientTunnel) &&
+					(!checkIsReal || router->GetProfile ()->IsReal ()) &&
 					(!endpoint || (router->IsV4 () && (!reverse || router->IsPublished (true)))); // endpoint must be ipv4 and published if inbound(reverse)
 			});
 	}
@@ -1314,12 +1336,8 @@ namespace data
 		{
 			// update selection
 			m_ExploratorySelection.clear ();
-#if (__cplusplus >= 201703L) // C++ 17 or higher
 			std::vector<std::shared_ptr<const RouterInfo> > eligible;
-			eligible.reserve (m_RouterInfos.size ());
-#else		
-			auto& eligible = m_ExploratorySelection;
-#endif			
+			eligible.reserve (m_RouterInfos.size ());		
 			{
 				// collect eligible from current netdb
 				bool checkIsReal = i2p::tunnel::tunnels.GetPreciseTunnelCreationSuccessRate () < NETDB_TUNNEL_CREATION_RATE_THRESHOLD; // too low rate
@@ -1329,22 +1347,13 @@ namespace data
 					 	(!checkIsReal || (it.second->HasProfile () && it.second->GetProfile ()->IsReal ())))
 							eligible.push_back (it.second);
 			}
-#if (__cplusplus >= 201703L) // C++ 17 or higher
 			if (eligible.size () > NETDB_MAX_EXPLORATORY_SELECTION_SIZE)
 			{
 				 std::sample (eligible.begin(), eligible.end(), std::back_inserter(m_ExploratorySelection),
-				 	NETDB_MAX_EXPLORATORY_SELECTION_SIZE, std::mt19937(ts));
+				 	NETDB_MAX_EXPLORATORY_SELECTION_SIZE, m_Rng);
 			}	
 			else
-				std::swap (m_ExploratorySelection, eligible);
-#else			
-			if (m_ExploratorySelection.size () > NETDB_MAX_EXPLORATORY_SELECTION_SIZE)
-			{
-				// reduce number of eligible to max selection size
-				std::shuffle (m_ExploratorySelection.begin(), m_ExploratorySelection.end(), std::mt19937(ts));
-				m_ExploratorySelection.resize (NETDB_MAX_EXPLORATORY_SELECTION_SIZE);
-			}	
-#endif			
+				std::swap (m_ExploratorySelection, eligible);	
 			m_LastExploratorySelectionUpdateTime = ts;
 		}	
 		

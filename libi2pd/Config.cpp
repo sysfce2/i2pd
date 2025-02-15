@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -117,9 +117,14 @@ namespace config {
 			("httpproxy.latency.max", value<std::string>()->default_value("0"),       "HTTP proxy max latency for tunnels")
 			("httpproxy.outproxy", value<std::string>()->default_value(""),           "HTTP proxy upstream out proxy url")
 			("httpproxy.addresshelper", value<bool>()->default_value(true),           "Enable or disable addresshelper")
+			("httpproxy.senduseragent", value<bool>()->default_value(false),          "Pass through user's User-Agent if enabled. Disabled by default")
 			("httpproxy.i2cp.leaseSetType", value<std::string>()->default_value("3"), "Local destination's LeaseSet type")
 			("httpproxy.i2cp.leaseSetEncType", value<std::string>()->default_value("0,4"), "Local destination's LeaseSet encryption type")
 			("httpproxy.i2cp.leaseSetPrivKey", value<std::string>()->default_value(""), "LeaseSet private key")
+			("httpproxy.i2p.streaming.maxOutboundSpeed", value<std::string>()->default_value("1730000000"), "Max outbound speed of HTTP proxy stream in bytes/sec")
+			("httpproxy.i2p.streaming.maxInboundSpeed", value<std::string>()->default_value("1730000000"), "Max inbound speed of HTTP proxy stream in bytes/sec")
+			("httpproxy.i2p.streaming.profile", value<std::string>()->default_value("1"), "HTTP Proxy bandwidth usage profile. 1 - bulk(high), 2- interactive(low)")
+
 		;
 
 		options_description socksproxy("SOCKS Proxy options");
@@ -144,8 +149,22 @@ namespace config {
 			("socksproxy.i2cp.leaseSetType", value<std::string>()->default_value("3"), "Local destination's LeaseSet type")
 			("socksproxy.i2cp.leaseSetEncType", value<std::string>()->default_value("0,4"), "Local destination's LeaseSet encryption type")
 			("socksproxy.i2cp.leaseSetPrivKey", value<std::string>()->default_value(""), "LeaseSet private key")
+			("socksproxy.i2p.streaming.maxOutboundSpeed", value<std::string>()->default_value("1730000000"), "Max outbound speed of SOCKS proxy stream in bytes/sec")
+			("socksproxy.i2p.streaming.maxInboundSpeed", value<std::string>()->default_value("1730000000"), "Max inbound speed of SOCKS proxy stream in bytes/sec")
+			("socksproxy.i2p.streaming.profile", value<std::string>()->default_value("1"), "SOCKS Proxy bandwidth usage profile. 1 - bulk(high), 2- interactive(low)")
 		;
 
+		options_description shareddest("Shared local destination options");
+		shareddest.add_options()
+			("shareddest.inbound.length", value<std::string>()->default_value("3"),    "Shared local destination inbound tunnel length")
+			("shareddest.outbound.length", value<std::string>()->default_value("3"),   "Shared local destination outbound tunnel length")
+			("shareddest.inbound.quantity", value<std::string>()->default_value("3"),  "Shared local destination inbound tunnels quantity")
+			("shareddest.outbound.quantity", value<std::string>()->default_value("3"), "Shared local destination outbound tunnels quantity")
+			("shareddest.i2cp.leaseSetType", value<std::string>()->default_value("3"), "Shared local destination's LeaseSet type")
+			("shareddest.i2cp.leaseSetEncType", value<std::string>()->default_value("0,4"), "Shared local destination's LeaseSet encryption type")
+			("shareddest.i2p.streaming.profile", value<std::string>()->default_value("2"), "Shared local destination bandwidth usage profile. 1 - bulk(high), 2- interactive(low)")
+		;	
+		
 		options_description sam("SAM bridge options");
 		sam.add_options()
 			("sam.enabled", value<bool>()->default_value(true),               "Enable or disable SAM Application bridge")
@@ -219,7 +238,7 @@ namespace config {
 				"https://reseed.onion.im/,"
 				"https://i2pseed.creativecowpat.net:8443/,"
 				"https://reseed.i2pgit.org/,"
-				"https://banana.incognet.io/,"
+				"https://coconut.incognet.io/,"
 				"https://reseed-pl.i2pd.xyz/,"
 				"https://www2.mk16.de/,"
 			    "https://i2p.ghativega.in/,"
@@ -230,7 +249,6 @@ namespace config {
 				"http://[324:71e:281a:9ed3::ace]:7070/,"
 				"http://[301:65b9:c7cd:9a36::1]:18801/,"
 				"http://[320:8936:ec1a:31f1::216]/,"
-				"http://[306:3834:97b9:a00a::1]/,"
 				"http://[316:f9e0:f22e:a74f::216]/"
 			),                                                            "Reseed URLs through the Yggdrasil, separated by comma")
 		;
@@ -308,11 +326,11 @@ namespace config {
 			("persist.addressbook", value<bool>()->default_value(true),    "Persist full addresses (default: true)")
 		;
 
-		options_description cpuext("CPU encryption extensions options");
+		options_description cpuext("CPU encryption extensions options. Deprecated");
 		cpuext.add_options()
-			("cpuext.aesni", bool_switch()->default_value(true),                     "Use auto detection for AESNI CPU extensions. If false, AESNI will be not used")
+			("cpuext.aesni", bool_switch()->default_value(true),                     "Deprecated option")
 			("cpuext.avx", bool_switch()->default_value(false),                      "Deprecated option")
-			("cpuext.force", bool_switch()->default_value(false),                    "Force usage of CPU extensions. Useful when cpuinfo is not available on virtual machines")
+			("cpuext.force", bool_switch()->default_value(false),                    "Deprecated option")
 		;
 
 		options_description meshnets("Meshnet transports options");
@@ -334,6 +352,7 @@ namespace config {
 			.add(httpserver)
 			.add(httpproxy)
 			.add(socksproxy)
+			.add(shareddest)
 			.add(sam)
 			.add(bob)
 			.add(i2cp)

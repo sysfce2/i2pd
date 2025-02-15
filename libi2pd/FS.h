@@ -15,9 +15,14 @@
 #include <sstream>
 #include <functional>
 
-#if (!defined(_WIN32) && !TARGET_OS_SIMULATOR && \
-	(__cplusplus >= 201703L) && defined(__cpp_lib_filesystem)) // C++ 17 or higher supporting filesystem
-#	define STD_FILESYSTEM 1
+#ifndef STD_FILESYSTEM
+#	if (_WIN32 && __GNUG__) // MinGW GCC somehow incorrectly converts paths
+#		define STD_FILESYSTEM 0
+#	elif (!TARGET_OS_SIMULATOR && __has_include(<filesystem>)) // supports std::filesystem
+#		define STD_FILESYSTEM 1
+#	else
+#		define STD_FILESYSTEM 0
+#	endif
 #endif
 
 namespace i2p {

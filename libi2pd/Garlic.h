@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -52,6 +52,7 @@ namespace garlic
 	const int OUTGOING_TAGS_CONFIRMATION_TIMEOUT = 10; // 10 seconds
 	const int LEASESET_CONFIRMATION_TIMEOUT = 4000; // in milliseconds
 	const int ROUTING_PATH_EXPIRATION_TIMEOUT = 120; // in seconds
+	const int INCOMING_SESSIONS_MINIMAL_INTERVAL = 200; // in milliseconds
 
 	struct SessionTag: public i2p::data::Tag<32>
 	{
@@ -115,7 +116,8 @@ namespace garlic
 			virtual bool IsReadyToSend () const { return true; };
 			virtual bool IsTerminated () const { return !GetOwner (); };
 			virtual uint64_t GetLastActivityTimestamp () const { return 0; }; // non-zero for rathets only
-
+			virtual void SetAckRequestInterval (int interval) {}; // in milliseconds, override in ECIESX25519AEADRatchetSession
+			
 			void SetLeaseSetUpdated ()
 			{
 				if (m_LeaseSetUpdateStatus != eLeaseSetDoNotSend) m_LeaseSetUpdateStatus = eLeaseSetUpdated;
@@ -204,6 +206,7 @@ namespace garlic
 			std::map<uint32_t, std::unique_ptr<UnconfirmedTags> > m_UnconfirmedTagsMsgs; // msgID->tags
 
 			i2p::crypto::CBCEncryption m_Encryption;
+			i2p::data::Tag<16> m_IV;
 
 		public:
 
@@ -234,11 +237,17 @@ namespace garlic
 			int GetNumTags () const { return m_NumTags; };
 			void SetNumRatchetInboundTags (int numTags) { m_NumRatchetInboundTags = numTags; };
 			int GetNumRatchetInboundTags () const { return m_NumRatchetInboundTags; };
-			std::shared_ptr<GarlicRoutingSession> GetRoutingSession (std::shared_ptr<const i2p::data::RoutingDestination> destination, bool attachLeaseSet);
+			std::shared_ptr<GarlicRoutingSession> GetRoutingSession (std::shared_ptr<const i2p::data::RoutingDestination> destination,
+				bool attachLeaseSet, bool requestNewIfNotFound = true);
 			void CleanupExpiredTags ();
 			void RemoveDeliveryStatusSession (uint32_t msgID);
 			std::shared_ptr<I2NPMessage> WrapMessageForRouter (std::shared_ptr<const i2p::data::RouterInfo> router,
 				std::shared_ptr<I2NPMessage> msg);
+			
+			bool AEADChaCha20Poly1305Encrypt (const uint8_t * msg, size_t msgLen, const uint8_t * ad, size_t adLen,
+				const uint8_t * key, const uint8_t * nonce, uint8_t * buf, size_t len); 
+			bool AEADChaCha20Poly1305Decrypt (const uint8_t * msg, size_t msgLen, const uint8_t * ad, size_t adLen,
+				const uint8_t * key, const uint8_t * nonce, uint8_t * buf, size_t len); 
 
 			void AddSessionKey (const uint8_t * key, const uint8_t * tag); // one tag
 			void AddECIESx25519Key (const uint8_t * key, uint64_t tag); // one tag
@@ -253,7 +262,7 @@ namespace garlic
 
 			virtual void ProcessGarlicMessage (std::shared_ptr<I2NPMessage> msg);
 			virtual void ProcessDeliveryStatusMessage (std::shared_ptr<I2NPMessage> msg);
-			virtual void SetLeaseSetUpdated ();
+			virtual void SetLeaseSetUpdated (bool post = false);
 
 			virtual std::shared_ptr<const i2p::data::LocalLeaseSet> GetLeaseSet () = 0; // TODO
 			virtual std::shared_ptr<i2p::tunnel::TunnelPool> GetTunnelPool () const = 0;
@@ -284,15 +293,18 @@ namespace garlic
 			std::unordered_map<i2p::data::IdentHash, ElGamalAESSessionPtr> m_Sessions;
 			std::unordered_map<i2p::data::Tag<32>, ECIESX25519AEADRatchetSessionPtr> m_ECIESx25519Sessions; // static key -> session
 			uint8_t * m_PayloadBuffer; // for ECIESX25519AEADRatchet
+			uint64_t m_LastIncomingSessionTimestamp; // in milliseconds
 			// incoming
 			int m_NumRatchetInboundTags;
 			std::unordered_map<SessionTag, std::shared_ptr<AESDecryption>, std::hash<i2p::data::Tag<32> > > m_Tags;
 			std::unordered_map<uint64_t, ECIESX25519AEADRatchetIndexTagset> m_ECIESx25519Tags; // session tag -> session
-			ReceiveRatchetTagSetPtr m_LastTagset; // tagset last message came for
 			// DeliveryStatus
 			std::mutex m_DeliveryStatusSessionsMutex;
 			std::unordered_map<uint32_t, GarlicRoutingSessionPtr> m_DeliveryStatusSessions; // msgID -> session
-
+			// encryption
+			i2p::crypto::AEADChaCha20Poly1305Encryptor m_Encryptor;
+			i2p::crypto::AEADChaCha20Poly1305Decryptor m_Decryptor;
+			
 		public:
 
 			// for HTTP only

@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -371,7 +371,7 @@ namespace client
 			// udp forward selected
 			boost::system::error_code e;
 			// TODO: support hostnames in udp forward
-			auto addr = boost::asio::ip::address::from_string(params[SAM_PARAM_HOST], e);
+			auto addr = boost::asio::ip::make_address(params[SAM_PARAM_HOST], e);
 			if (e)
 			{
 				// not an ip address
@@ -624,7 +624,7 @@ namespace client
 					auto socket = session->acceptQueue.front ().first;
 					session->acceptQueue.pop_front ();
 					if (socket)
-						m_Owner.GetService ().post (std::bind(&SAMSocket::TerminateClose, socket));
+						boost::asio::post (m_Owner.GetService (), std::bind(&SAMSocket::TerminateClose, socket));
 				}
 				if (session->acceptQueue.size () < SAM_SESSION_MAX_ACCEPT_QUEUE_SIZE)
 				{
@@ -1046,13 +1046,13 @@ namespace client
 				else
 				{
 					auto s = shared_from_this ();
-					m_Owner.GetService ().post ([s] { s->Terminate ("stream read error"); });
+					boost::asio::post (m_Owner.GetService (), [s] { s->Terminate ("stream read error"); });
 				}
 			}
 			else
 			{
 				auto s = shared_from_this ();
-				m_Owner.GetService ().post ([s] { s->Terminate ("stream read error (op aborted)"); });
+				boost::asio::post (m_Owner.GetService (), [s] { s->Terminate ("stream read error (op aborted)"); });
 			}
 		}
 		else
@@ -1102,7 +1102,7 @@ namespace client
 					auto socket = session->acceptQueue.front ().first;
 					session->acceptQueue.pop_front ();
 					if (socket)
-						m_Owner.GetService ().post (std::bind(&SAMSocket::TerminateClose, socket));
+						boost::asio::post (m_Owner.GetService (), std::bind(&SAMSocket::TerminateClose, socket));
 				}
 				if (!session->acceptQueue.empty ())
 				{
@@ -1236,7 +1236,7 @@ namespace client
 
 	void SAMSocket::HandleStreamSend(const boost::system::error_code & ec)
 	{
-		m_Owner.GetService ().post (std::bind( !ec ? &SAMSocket::Receive : &SAMSocket::TerminateClose, shared_from_this()));
+		boost::asio::post (m_Owner.GetService (), std::bind( !ec ? &SAMSocket::Receive : &SAMSocket::TerminateClose, shared_from_this()));
 	}
 
 	SAMSession::SAMSession (SAMBridge & parent, const std::string & id, SAMSessionType type):
@@ -1310,8 +1310,8 @@ namespace client
 
 	SAMBridge::SAMBridge (const std::string& address, uint16_t portTCP, uint16_t portUDP, bool singleThread):
 		RunnableService ("SAM"), m_IsSingleThread (singleThread),
-		m_Acceptor (GetIOService (), boost::asio::ip::tcp::endpoint(boost::asio::ip::address::from_string(address), portTCP)),
-		m_DatagramEndpoint (boost::asio::ip::address::from_string(address), (!portUDP) ? portTCP-1 : portUDP), m_DatagramSocket (GetIOService (), m_DatagramEndpoint),
+		m_Acceptor (GetIOService (), boost::asio::ip::tcp::endpoint(boost::asio::ip::make_address(address), portTCP)),
+		m_DatagramEndpoint (boost::asio::ip::make_address(address), (!portUDP) ? portTCP-1 : portUDP), m_DatagramSocket (GetIOService (), m_DatagramEndpoint),
 		m_SignatureTypes
 		{
 			{"DSA_SHA1", i2p::data::SIGNING_KEY_TYPE_DSA_SHA1},
@@ -1350,12 +1350,14 @@ namespace client
 			LogPrint (eLogError, "SAM: Runtime exception: ", ex.what ());
 		}
 
+		decltype(m_Sessions) sessions;
 		{
 			std::unique_lock<std::mutex> l(m_SessionsMutex);
-			for (auto& it: m_Sessions)
-				it.second->Close ();
-			m_Sessions.clear ();
-		}
+			m_Sessions.swap (sessions);
+		}	
+		for (auto& it: sessions)
+			it.second->Close ();
+		
 		StopIOService ();
 	}
 

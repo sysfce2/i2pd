@@ -9,7 +9,9 @@
 #include <algorithm>
 
 #if defined(MAC_OSX)
+#if !STD_FILESYSTEM
 #include <boost/system/system_error.hpp>
+#endif
 #include <TargetConditionals.h>
 #endif
 
@@ -61,15 +63,17 @@ namespace fs {
 
 	const std::string GetUTF8DataDir () {
 #ifdef _WIN32
-#if (BOOST_VERSION >= 108500)
-		fs_lib::path path (dataDir);
-#else
-		fs_lib::wpath path (dataDir);
-#endif
-		auto loc = fs_lib::path::imbue(std::locale( std::locale(), new std::codecvt_utf8_utf16<wchar_t>() ) ); // convert path to UTF-8
-		auto dataDirUTF8 = path.string();
-		fs_lib::path::imbue(loc); // Return locale settings back
-		return dataDirUTF8;
+		int size = MultiByteToWideChar(CP_ACP, 0,
+			dataDir.c_str(), dataDir.size(), nullptr, 0);
+		std::wstring utf16Str(size, L'\0');
+		MultiByteToWideChar(CP_ACP, 0,
+			dataDir.c_str(), dataDir.size(), &utf16Str[0], size);
+		int utf8Size = WideCharToMultiByte(CP_UTF8, 0,
+			utf16Str.c_str(), utf16Str.size(), nullptr, 0, nullptr, nullptr);
+		std::string utf8Str(utf8Size, '\0');
+		WideCharToMultiByte(CP_UTF8, 0,
+			utf16Str.c_str(), utf16Str.size(), &utf8Str[0], utf8Size, nullptr, nullptr);
+		return utf8Str;
 #else
 		return dataDir; // linux, osx, android uses UTF-8 by default
 #endif
@@ -98,7 +102,7 @@ namespace fs {
 			}
 			else
 			{
-#if (BOOST_VERSION >= 108500)
+#if ((BOOST_VERSION >= 108500) || STD_FILESYSTEM)
 				dataDir = fs_lib::path(commonAppData).string() + "\\" + appName;
 #else
 				dataDir = fs_lib::wpath(commonAppData).string() + "\\" + appName;
@@ -127,7 +131,7 @@ namespace fs {
 		}
 		else
 		{
-#if (BOOST_VERSION >= 108500)
+#if ((BOOST_VERSION >= 108500) || STD_FILESYSTEM)
 			auto execPath = fs_lib::path(localAppData).parent_path();
 #else
 			auto execPath = fs_lib::wpath(localAppData).parent_path();
@@ -150,7 +154,7 @@ namespace fs {
 				}
 				else
 				{
-#if (BOOST_VERSION >= 108500)
+#if ((BOOST_VERSION >= 108500) || STD_FILESYSTEM)
 					dataDir = fs_lib::path(localAppData).string() + "\\" + appName;
 #else
 					dataDir = fs_lib::wpath(localAppData).string() + "\\" + appName;
@@ -252,14 +256,18 @@ namespace fs {
 		std::error_code ec;
 		auto t = std::filesystem::last_write_time (path, ec);
 		if (ec) return 0;
-		auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+/*#if __cplusplus >= 202002L // C++ 20 or higher
+		const auto sctp = std::chrono::clock_cast<std::chrono::system_clock>(t);
+#else	*/	// TODO: wait until implemented
+		const auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
 		    t - decltype(t)::clock::now() + std::chrono::system_clock::now());
-   		return std::chrono::system_clock::to_time_t(sctp);	
-#else		
+/*#endif */
+		return std::chrono::system_clock::to_time_t(sctp);
+#else
 		boost::system::error_code ec;
 		auto t = boost::filesystem::last_write_time (path, ec);
 		return ec ? 0 : t;
-#endif		
+#endif
 	}
 
 	bool Remove(const std::string & path) {

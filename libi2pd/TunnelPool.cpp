@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2013-2024, The PurpleI2P Project
+* Copyright (c) 2013-2025, The PurpleI2P Project
 *
 * This file is part of Purple i2pd project and licensed under BSD3
 *
@@ -41,11 +41,11 @@ namespace tunnel
 	}
 
 	TunnelPool::TunnelPool (int numInboundHops, int numOutboundHops, int numInboundTunnels,
-		int numOutboundTunnels, int inboundVariance, int outboundVariance):
+		int numOutboundTunnels, int inboundVariance, int outboundVariance, bool isHighBandwidth):
 		m_NumInboundHops (numInboundHops), m_NumOutboundHops (numOutboundHops),
 		m_NumInboundTunnels (numInboundTunnels), m_NumOutboundTunnels (numOutboundTunnels),
 		m_InboundVariance (inboundVariance), m_OutboundVariance (outboundVariance),
-		m_IsActive (true), m_CustomPeerSelector(nullptr), 
+		m_IsActive (true), m_IsHighBandwidth (isHighBandwidth), m_CustomPeerSelector(nullptr), 
 		m_Rng(i2p::util::GetMonotonicMicroseconds ()%1000000LL)
 	{
 		if (m_NumInboundTunnels > TUNNEL_POOL_MAX_INBOUND_TUNNELS_QUANTITY)
@@ -141,7 +141,7 @@ namespace tunnel
 			m_InboundTunnels.insert (createdTunnel);
 		}
 		if (m_LocalDestination)
-			m_LocalDestination->SetLeaseSetUpdated ();
+			m_LocalDestination->SetLeaseSetUpdated (true);
 	}
 
 	void TunnelPool::TunnelExpired (std::shared_ptr<InboundTunnel> expiredTunnel)
@@ -330,7 +330,7 @@ namespace tunnel
 		}
 
 		if (num < m_NumInboundTunnels && m_NumInboundHops <= 0 && m_LocalDestination) // zero hops IB
-			m_LocalDestination->SetLeaseSetUpdated (); // update LeaseSet immediately
+			m_LocalDestination->SetLeaseSetUpdated (true); // update LeaseSet immediately
 	}
 
 	void TunnelPool::TestTunnels ()
@@ -351,10 +351,13 @@ namespace tunnel
 				{
 					it.second.first->SetState (eTunnelStateFailed);
 					std::unique_lock<std::mutex> l(m_OutboundTunnelsMutex);
-					if (m_OutboundTunnels.size () > 1 || m_NumOutboundTunnels <= 1) // don't fail last tunnel
+					if (m_OutboundTunnels.size () > 1) // don't fail last tunnel
 						m_OutboundTunnels.erase (it.second.first);
 					else
+					{	
 						it.second.first->SetState (eTunnelStateTestFailed);
+						CreateOutboundTunnel (); // create new tunnel immediately because last one failed
+					}		
 				}
 				else if (it.second.first->GetState () != eTunnelStateExpiring)
 					it.second.first->SetState (eTunnelStateTestFailed);
@@ -368,19 +371,22 @@ namespace tunnel
 						bool failed = false;
 						{
 							std::unique_lock<std::mutex> l(m_InboundTunnelsMutex);
-							if (m_InboundTunnels.size () > 1 || m_NumInboundTunnels <= 1) // don't fail last tunnel
+							if (m_InboundTunnels.size () > 1) // don't fail last tunnel
 							{	
 								m_InboundTunnels.erase (it.second.second);
 								failed = true;	
 							}	
 							else
+							{
 								it.second.second->SetState (eTunnelStateTestFailed);
+								CreateInboundTunnel (); // create new tunnel immediately because last one failed
+							}	
 						}
 						if (failed && m_LocalDestination)
-							m_LocalDestination->SetLeaseSetUpdated ();
+							m_LocalDestination->SetLeaseSetUpdated (true);
 					}
 					if (m_LocalDestination)
-						m_LocalDestination->SetLeaseSetUpdated ();
+						m_LocalDestination->SetLeaseSetUpdated (true);
 				}
 				else if (it.second.second->GetState () != eTunnelStateExpiring)
 					it.second.second->SetState (eTunnelStateTestFailed);
@@ -549,20 +555,22 @@ namespace tunnel
 	std::shared_ptr<const i2p::data::RouterInfo> TunnelPool::SelectNextHop (std::shared_ptr<const i2p::data::RouterInfo> prevHop, 
 		bool reverse, bool endpoint) const
 	{
-		bool tryHighBandwidth = !IsExploratory ();
+		bool tryClient = !IsExploratory () && !i2p::context.IsLimitedConnectivity ();
 		std::shared_ptr<const i2p::data::RouterInfo> hop;
 		for (int i = 0; i < TUNNEL_POOL_MAX_HOP_SELECTION_ATTEMPTS; i++)
 		{
-			hop = tryHighBandwidth ?
-				i2p::data::netdb.GetHighBandwidthRandomRouter (prevHop, reverse, endpoint) :
-				i2p::data::netdb.GetRandomRouter (prevHop, reverse, endpoint);
+			hop = tryClient ?
+				(m_IsHighBandwidth ?
+				 	i2p::data::netdb.GetHighBandwidthRandomRouter (prevHop, reverse, endpoint) : 
+				 	i2p::data::netdb.GetRandomRouter (prevHop, reverse, endpoint, true)):
+				i2p::data::netdb.GetRandomRouter (prevHop, reverse, endpoint, false);
 			if (hop)
 			{
-				if (!hop->GetProfile ()->IsBad ())
+				if (!hop->HasProfile () || !hop->GetProfile ()->IsBad ())
 					break;
 			}
-			else if (tryHighBandwidth)
-				tryHighBandwidth = false;
+			else if (tryClient)
+				tryClient = false;
 			else
 				return nullptr;
 		}
@@ -585,8 +593,8 @@ namespace tunnel
 		else if (i2p::transport::transports.GetNumPeers () > 100 ||
 			(inbound && i2p::transport::transports.GetNumPeers () > 25))
 		{
-			auto r = i2p::transport::transports.GetRandomPeer (!IsExploratory ());
-			if (r && r->IsECIES () && !r->GetProfile ()->IsBad () &&
+			auto r = i2p::transport::transports.GetRandomPeer (m_IsHighBandwidth && !i2p::context.IsLimitedConnectivity ());
+			if (r && r->IsECIES () && (!r->HasProfile () || !r->GetProfile ()->IsBad ()) &&
 				(numHops > 1 || (r->IsV4 () && (!inbound || r->IsPublished (true))))) // first inbound must be published ipv4
 			{
 				prevHop = r;
